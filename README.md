@@ -66,56 +66,56 @@ Now usable in general, but may be a bit fiddly to get up and running.
    * edit pg_hba.conf to ensure connections from docker container IPs will be
      allowed (e.g. by enabling `trust` for user `synapse`). Example:
 
-```
-# Add the following to the end of the file
-local   all             synapse                                 trust
-host    all             all             YOUR_DOCKER_HOST_IP/16  trust
-```
+     ```
+     # Add the following to the end of the file
+     local   all             synapse                                 trust
+     host    all             all             YOUR_DOCKER_HOST_IP/16  trust
+     ```
 
    * Recommended: It's worth making the user you plan to run meshsim a superuser
-   in postgres, such that commands do not need to be prefixed with `sudo -u postgres`.
-   You can do so with the following:
+     in postgres, such that commands do not need to be prefixed with `sudo -u postgres`.
+     You can do so with the following:
 
-   ```
-   sudo -u postgres createuser --superuser --no-password user
-   ```
+     ```
+     sudo -u postgres createuser --superuser --no-password user
+     ```
 
  * Optional: Enable KSM on your host so your synapses can deduplicate RAM
    as much as possible
 
- ```sh
-screen ~/Library/Containers/com.docker.docker/Data/vms/0/tty  # on Docker-for-Mac
-echo 1 > /sys/kernel/mm/ksm/run
-echo 10000 > /sys/kernel/mm/ksm/pages_to_scan # 40MB of pages at a time
+   ```sh
+   screen ~/Library/Containers/com.docker.docker/Data/vms/0/tty  # on Docker-for-Mac
+   echo 1 > /sys/kernel/mm/ksm/run
+   echo 10000 > /sys/kernel/mm/ksm/pages_to_scan # 40MB of pages at a time
 
-# check to see if it's working (will only kick in once you start running something which requests KSM, like our KSMified synapse)
-grep -H '' /sys/kernel/mm/ksm/run/*
-```
+   # check to see if it's working (will only kick in once you start running something which requests KSM, like our KSMified synapse)
+   grep -H '' /sys/kernel/mm/ksm/run/*
+   ```
 
  * create a empty directory, e.g. `matrix-low-bandwidth`
 
  * check out meshsim
-```
-matrix-low-bandwidth$ git clone https://github.com/matrix-org/meshsim.git
-```
+   ```
+   matrix-low-bandwidth$ git clone https://github.com/matrix-org/meshsim.git
+   ```
 
  * Build the (KSM-capable) docker image:
    * Clone `synapse` repo and checkout the `babolivier/low-bandwidth` branch (inside the `matrix-low-bandwidth` directory)
-```
-matrix-low-bandwidth$ git clone https://github.com/matrix-org/synapse.git
-matrix-low-bandwidth$ cd synapse
-synapse$ git checkout babolivier/low-bandwidth
-```
+     ```
+     matrix-low-bandwidth$ git clone https://github.com/matrix-org/synapse.git
+     matrix-low-bandwidth$ cd synapse
+     synapse$ git checkout babolivier/low-bandwidth
+     ```
 
    * Clone the `meshsim-docker` repo (inside the `matrix-low-bandwidth` directory)
-```
-matrix-low-bandwidth$ git clone https://github.com/matrix-org/meshsim-docker.git
-```
+     ```
+     matrix-low-bandwidth$ git clone https://github.com/matrix-org/meshsim-docker.git
+     ```
 
    * Clone the `coap-proxy` repo (inside the `matrix-low-bandwidth` directory)
-```
-matrix-low-bandwidth$ git clone https://github.com/matrix-org/coap-proxy.git
-```
+     ```
+     matrix-low-bandwidth$ git clone https://github.com/matrix-org/coap-proxy.git
+     ```
 
    * Run `docker build -t synapse -f meshsim-docker/Dockerfile .` from the top of the
      `matrix-low-bandwidth` directory (***not*** inside the `synapse` repo)
@@ -124,28 +124,28 @@ matrix-low-bandwidth$ git clone https://github.com/matrix-org/coap-proxy.git
    synapse. This allows doing synapse dev without having to rebuild images. See
    `start_hs.sh` for details. An example of the `docker run` command in `start_hs.sh` is below:
 
-```
-docker run -d --name synapse$HSID \
-	--privileged \
-	--network mesh \
-	--hostname synapse$HSID \
-	-e SYNAPSE_SERVER_NAME=synapse${HSID} \
-	-e SYNAPSE_REPORT_STATS=no \
-	-e SYNAPSE_ENABLE_REGISTRATION=yes \
-	-e SYNAPSE_LOG_LEVEL=INFO \
-	-e POSTGRES_DB=synapse$HSID \
-	-e POSTGRES_PASSWORD=synapseftw \
-	-p $((18000 + HSID)):8008 \
-	-p $((19000 + HSID)):3000 \
-	-p $((20000 + HSID)):5683/udp \
-	-e POSTGRES_HOST=$HOST_IP \
-	-e SYNAPSE_LOG_HOST=$HOST_IP \
-	-e SYNAPSE_USE_PROXY=1 \
-	-e PROXY_DUMP_PAYLOADS=1 \
-	--mount type=bind,source=/home/user/matrix-low-bandwidth/coap-proxy,destination=/proxy \
-	--mount type=bind,source=/home/user/matrix-low-bandwidth/synapse/synapse,destination=/usr/local/lib/python3.7/site-packages/synapse \
-	synapse
-```
+   ```
+   docker run -d --name synapse$HSID \
+   	--privileged \
+   	--network mesh \
+   	--hostname synapse$HSID \
+   	-e SYNAPSE_SERVER_NAME=synapse${HSID} \
+   	-e SYNAPSE_REPORT_STATS=no \
+   	-e SYNAPSE_ENABLE_REGISTRATION=yes \
+   	-e SYNAPSE_LOG_LEVEL=INFO \
+   	-e POSTGRES_DB=synapse$HSID \
+   	-e POSTGRES_PASSWORD=synapseftw \
+   	-p $((18000 + HSID)):8008 \
+   	-p $((19000 + HSID)):3000 \
+   	-p $((20000 + HSID)):5683/udp \
+   	-e POSTGRES_HOST=$HOST_IP \
+   	-e SYNAPSE_LOG_HOST=$HOST_IP \
+   	-e SYNAPSE_USE_PROXY=1 \
+   	-e PROXY_DUMP_PAYLOADS=1 \
+   	--mount type=bind,source=/home/user/matrix-low-bandwidth/coap-proxy,destination=/proxy \
+   	--mount type=bind,source=/home/user/matrix-low-bandwidth/synapse/synapse,destination=/usr/local/lib/python3.7/site-packages/synapse \
+   	synapse
+   ```
 
  * check you can start a synapse via `./start_hs.sh 1 $DOCKER_IP` with DOCEKR_IP being the docker network gateway IP.
     * If the template import fails with something about `en_GB`, make sure you have that locale generated. Replacing `en_GB` with `en_US` or whatever your locale is in `synapse_template.sql` is also sufficient.
@@ -179,9 +179,9 @@ and generally see what see what's going on.
 * Build the proxy (see instruction in the [proxy's README](https://github.com/matrix-org/coap-proxy/blob/master/README.md))
 * Run it by telling it to talk to the HS's proxy:
 
-```bash
-./bin/coap-proxy --coap-target localhost:20001 # Ports are 20000 + hsid
-```
+  ```bash
+  ./bin/coap-proxy --coap-target localhost:20001 # Ports are 20000 + hsid
+  ```
 
 * Make clients talk to http://localhost:8888
 * => profit
