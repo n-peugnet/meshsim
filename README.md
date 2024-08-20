@@ -101,11 +101,11 @@ Now usable in general, but may be a bit fiddly to get up and running.
    ```
 
  * Build the (KSM-capable) docker image:
-   * Clone `synapse` repo and checkout the `babolivier/low-bandwidth` branch (inside the `matrix-low-bandwidth` directory)
+   * Clone `synapse` repo and checkout the `n-peugnet/low-bandwidth` branch (inside the `matrix-low-bandwidth` directory)
      ```
-     matrix-low-bandwidth$ git clone https://github.com/element-hq/synapse
+     matrix-low-bandwidth$ git clone https://github.com/n-peugnet/synapse
      matrix-low-bandwidth$ cd synapse
-     synapse$ git checkout babolivier/low-bandwidth
+     synapse$ git checkout n-peugnet/low-bandwidth
      ```
 
    * Clone the `meshsim-docker` repo (inside the `matrix-low-bandwidth` directory)
