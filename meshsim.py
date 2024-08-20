@@ -530,13 +530,13 @@ mesh = Mesh("")
 
 
 @app.route("/")
-def send_index():
-    return send_from_directory("", "index.html")
+async def send_index():
+    return await send_from_directory("", "index.html")
 
 
 @app.route("/static/<path:filename>")
-def send_static(filename):
-    return send_from_directory("static/", filename)
+async def send_static(filename):
+    return await send_from_directory("static/", filename)
 
 
 @app.route("/server", methods=["POST"])
