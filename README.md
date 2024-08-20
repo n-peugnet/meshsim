@@ -77,7 +77,8 @@ Now usable in general, but may be a bit fiddly to get up and running.
      You can do so with the following:
 
      ```
-     sudo -u postgres createuser --superuser --no-password user
+     sudo -u postgres createuser --superuser --no-password $USER
+     sudo -u postgres createdb $USER
      ```
 
  * Optional: Enable KSM on your host so your synapses can deduplicate RAM
