@@ -47,8 +47,9 @@ POSTGRES_PORT = os.environ.get("POSTGRES_PORT", 5432)
 def run(cmd):
     out = subprocess.run(
         cmd,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
     )
     result = "\n>>> " + ' '.join(cmd)
     if out.stdout:
