@@ -50,7 +50,7 @@ if ! dropdb --if-exists synapse${HSID} ; then
 	exit 1
 fi
 
-psql --variable="ON_ERROR_STOP=" -f synapse_template.sql > /dev/null 2>&1
+psql --variable="ON_ERROR_STOP=" -f synapse_template.sql > /dev/null
 createdb -O synapse synapse${HSID} -T synapse_template
 
 # shouldn't we put this in the template?
