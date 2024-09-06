@@ -90,7 +90,7 @@ docker run -d --name synapse$HSID \
 	-e SYNAPSE_SERVER_NAME=synapse${HSID} \
 	-e SYNAPSE_REPORT_STATS=no \
 	-e SYNAPSE_ENABLE_REGISTRATION=yes \
-	-e SYNAPSE_LOG_LEVEL=INFO \
+	-e SYNAPSE_LOG_LEVEL=DEBUG \
 	-e POSTGRES_DB=synapse$HSID \
 	-e POSTGRES_PASSWORD=synapseftw \
 	-p $((18000 + HSID)):8008 \
