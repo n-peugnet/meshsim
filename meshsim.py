@@ -618,6 +618,7 @@ async def on_incoming_log():
 
 @app.websocket("/event_notifs")
 async def event_notifs():
+    await websocket.send("{}")
     while True:
         msg = await event_notif_queue.get()
         await websocket.send(json.dumps(msg))
