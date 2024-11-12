@@ -57,12 +57,12 @@ createdb -O synapse synapse${HSID} -T synapse_template
 psql synapse$HSID <<EOT
 insert into users(name, password_hash) values ('@matthew:synapse$HSID', '\$2b\$12\$oOZr9g6bPScmPrpJHv/uuu2piCg7kN8ia/BAlfW6wske/1kLf8kze');
 insert into access_tokens(id, user_id, token) values (123123, '@matthew:synapse$HSID', 'fake_token');
-insert into profiles(user_id) values ('matthew');
+insert into profiles(user_id, full_user_id) values ('matthew', '@matthew:synapse$HSID');
 EOT
 
 # insert into users(name, password_hash) values ('@amandine:synapse$HSID', '\$2b\$12\$oOZr9g6bPScmPrpJHv/uuu2piCg7kN8ia/BAlfW6wske/1kLf8kze');
 # insert into access_tokens(id, user_id, token) values (123123, '@amandine:synapse$HSID', 'fake_token');
-# insert into profiles(user_id) values ('amandine');
+# insert into profiles(user_id, full_user_id) values ('amandine', '@matthew:synapse$HSID');
 
 # build our synapse via:
 # docker build -t synapse -f docker/Dockerfile .

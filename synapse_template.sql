@@ -2,8 +2,8 @@
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 9.6.11
--- Dumped by pg_dump version 9.6.11
+-- Dumped from database version 15.8 (Debian 15.8-0+deb12u1)
+-- Dumped by pg_dump version 15.8 (Debian 15.8-0+deb12u1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -12,6 +12,7 @@ SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
 SET check_function_bodies = false;
+SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
 
@@ -33,6 +34,7 @@ SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
 SET check_function_bodies = false;
+SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
 
@@ -50,9 +52,122 @@ CREATE EXTENSION IF NOT EXISTS plpgsql WITH SCHEMA pg_catalog;
 COMMENT ON EXTENSION plpgsql IS 'PL/pgSQL procedural language';
 
 
+--
+-- Name: check_event_stream_ordering(); Type: FUNCTION; Schema: public; Owner: synapse
+--
+
+CREATE FUNCTION public.check_event_stream_ordering() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM events
+                    WHERE events.event_id = NEW.event_id
+                       AND events.stream_ordering != NEW.event_stream_ordering
+                ) THEN
+                    RAISE EXCEPTION 'Incorrect event_stream_ordering';
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+
+
+ALTER FUNCTION public.check_event_stream_ordering() OWNER TO synapse;
+
+--
+-- Name: check_partial_state_events(); Type: FUNCTION; Schema: public; Owner: synapse
+--
+
+CREATE FUNCTION public.check_partial_state_events() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM events
+                    WHERE events.event_id = NEW.event_id
+                       AND events.room_id != NEW.room_id
+                ) THEN
+                    RAISE EXCEPTION 'Incorrect room_id in partial_state_events';
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+
+
+ALTER FUNCTION public.check_partial_state_events() OWNER TO synapse;
+
+--
+-- Name: delete_read_write_lock_parent(); Type: FUNCTION; Schema: public; Owner: synapse
+--
+
+CREATE FUNCTION public.delete_read_write_lock_parent() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    new_token TEXT;
+    mode_row_token TEXT;
+BEGIN
+    -- Only update the token in `_mode` if its our token. This prevents
+    -- deadlocks.
+    --
+    -- We shove the token into `mode_row_token`, as otherwise postgres complains
+    -- we're not using the returned data.
+    SELECT token INTO mode_row_token FROM worker_read_write_locks_mode
+        WHERE
+            lock_name = OLD.lock_name
+            AND lock_key = OLD.lock_key
+            AND token = OLD.token
+        FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT token INTO new_token FROM worker_read_write_locks
+        WHERE
+            lock_name = OLD.lock_name
+            AND lock_key = OLD.lock_key
+        LIMIT 1 FOR UPDATE SKIP LOCKED;
+
+    IF NOT FOUND THEN
+        DELETE FROM worker_read_write_locks_mode
+            WHERE lock_name = OLD.lock_name AND lock_key = OLD.lock_key AND token = OLD.token;
+    ELSE
+        UPDATE worker_read_write_locks_mode
+            SET token = new_token
+            WHERE lock_name = OLD.lock_name AND lock_key = OLD.lock_key;
+    END IF;
+
+    RETURN NEW;
+END
+$$;
+
+
+ALTER FUNCTION public.delete_read_write_lock_parent() OWNER TO synapse;
+
+--
+-- Name: upsert_read_write_lock_parent(); Type: FUNCTION; Schema: public; Owner: synapse
+--
+
+CREATE FUNCTION public.upsert_read_write_lock_parent() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    INSERT INTO worker_read_write_locks_mode (lock_name, lock_key, write_lock, token)
+        VALUES (NEW.lock_name, NEW.lock_key, NEW.write_lock, NEW.token)
+        ON CONFLICT (lock_name, lock_key)
+        DO UPDATE SET write_lock = NEW.write_lock
+            WHERE OLD.write_lock != NEW.write_lock;
+    RETURN NEW;
+END
+$$;
+
+
+ALTER FUNCTION public.upsert_read_write_lock_parent() OWNER TO synapse;
+
 SET default_tablespace = '';
 
-SET default_with_oids = false;
+SET default_table_access_method = heap;
 
 --
 -- Name: access_tokens; Type: TABLE; Schema: public; Owner: synapse
@@ -63,7 +178,11 @@ CREATE TABLE public.access_tokens (
     user_id text NOT NULL,
     device_id text,
     token text NOT NULL,
-    last_used bigint
+    valid_until_ms bigint,
+    puppets_user_id text,
+    last_validated bigint,
+    refresh_token_id bigint,
+    used boolean
 );
 
 
@@ -77,53 +196,41 @@ CREATE TABLE public.account_data (
     user_id text NOT NULL,
     account_data_type text NOT NULL,
     stream_id bigint NOT NULL,
-    content text NOT NULL
+    content text NOT NULL,
+    instance_name text
 );
 
 
 ALTER TABLE public.account_data OWNER TO synapse;
 
 --
--- Name: account_data_max_stream_id; Type: TABLE; Schema: public; Owner: synapse
+-- Name: account_data_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.account_data_max_stream_id (
-    lock character(1) DEFAULT 'X'::bpchar NOT NULL,
-    stream_id bigint NOT NULL,
-    CONSTRAINT private_user_data_max_stream_id_lock_check CHECK ((lock = 'X'::bpchar))
+CREATE SEQUENCE public.account_data_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.account_data_sequence OWNER TO synapse;
+
+--
+-- Name: account_validity; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.account_validity (
+    user_id text NOT NULL,
+    expiration_ts_ms bigint NOT NULL,
+    email_sent boolean NOT NULL,
+    renewal_token text,
+    token_used_ts_ms bigint
 );
 
 
-ALTER TABLE public.account_data_max_stream_id OWNER TO synapse;
-
---
--- Name: application_services; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.application_services (
-    id bigint NOT NULL,
-    url text,
-    token text,
-    hs_token text,
-    sender text
-);
-
-
-ALTER TABLE public.application_services OWNER TO synapse;
-
---
--- Name: application_services_regex; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.application_services_regex (
-    id bigint NOT NULL,
-    as_id bigint NOT NULL,
-    namespace integer,
-    regex text
-);
-
-
-ALTER TABLE public.application_services_regex OWNER TO synapse;
+ALTER TABLE public.account_validity OWNER TO synapse;
 
 --
 -- Name: application_services_state; Type: TABLE; Schema: public; Owner: synapse
@@ -132,11 +239,28 @@ ALTER TABLE public.application_services_regex OWNER TO synapse;
 CREATE TABLE public.application_services_state (
     as_id text NOT NULL,
     state character varying(5),
-    last_txn integer
+    read_receipt_stream_id bigint,
+    presence_stream_id bigint,
+    to_device_stream_id bigint,
+    device_list_stream_id bigint
 );
 
 
 ALTER TABLE public.application_services_state OWNER TO synapse;
+
+--
+-- Name: application_services_txn_id_seq; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.application_services_txn_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.application_services_txn_id_seq OWNER TO synapse;
 
 --
 -- Name: application_services_txns; Type: TABLE; Schema: public; Owner: synapse
@@ -144,7 +268,7 @@ ALTER TABLE public.application_services_state OWNER TO synapse;
 
 CREATE TABLE public.application_services_txns (
     as_id text NOT NULL,
-    txn_id integer NOT NULL,
+    txn_id bigint NOT NULL,
     event_ids text NOT NULL
 );
 
@@ -208,7 +332,8 @@ ALTER TABLE public.appservice_stream_position OWNER TO synapse;
 CREATE TABLE public.background_updates (
     update_name text NOT NULL,
     progress_json text NOT NULL,
-    depends_on text
+    depends_on text,
+    ordering integer DEFAULT 0 NOT NULL
 );
 
 
@@ -227,18 +352,33 @@ CREATE TABLE public.blocked_rooms (
 ALTER TABLE public.blocked_rooms OWNER TO synapse;
 
 --
--- Name: cache_invalidation_stream; Type: TABLE; Schema: public; Owner: synapse
+-- Name: cache_invalidation_stream_by_instance; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.cache_invalidation_stream (
-    stream_id bigint,
-    cache_func text,
+CREATE TABLE public.cache_invalidation_stream_by_instance (
+    stream_id bigint NOT NULL,
+    instance_name text NOT NULL,
+    cache_func text NOT NULL,
     keys text[],
     invalidation_ts bigint
 );
 
 
-ALTER TABLE public.cache_invalidation_stream OWNER TO synapse;
+ALTER TABLE public.cache_invalidation_stream_by_instance OWNER TO synapse;
+
+--
+-- Name: cache_invalidation_stream_seq; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.cache_invalidation_stream_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.cache_invalidation_stream_seq OWNER TO synapse;
 
 --
 -- Name: current_state_delta_stream; Type: TABLE; Schema: public; Owner: synapse
@@ -250,7 +390,8 @@ CREATE TABLE public.current_state_delta_stream (
     type text NOT NULL,
     state_key text NOT NULL,
     event_id text,
-    prev_event_id text
+    prev_event_id text,
+    instance_name text
 );
 
 
@@ -264,22 +405,60 @@ CREATE TABLE public.current_state_events (
     event_id text NOT NULL,
     room_id text NOT NULL,
     type text NOT NULL,
-    state_key text NOT NULL
+    state_key text NOT NULL,
+    membership text,
+    event_stream_ordering bigint
 );
 
 
 ALTER TABLE public.current_state_events OWNER TO synapse;
 
 --
--- Name: current_state_resets; Type: TABLE; Schema: public; Owner: synapse
+-- Name: dehydrated_devices; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.current_state_resets (
-    event_stream_ordering bigint NOT NULL
+CREATE TABLE public.dehydrated_devices (
+    user_id text NOT NULL,
+    device_id text NOT NULL,
+    device_data text NOT NULL
 );
 
 
-ALTER TABLE public.current_state_resets OWNER TO synapse;
+ALTER TABLE public.dehydrated_devices OWNER TO synapse;
+
+--
+-- Name: delayed_events; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.delayed_events (
+    delay_id text NOT NULL,
+    user_localpart text NOT NULL,
+    device_id text,
+    delay bigint NOT NULL,
+    send_ts bigint NOT NULL,
+    room_id text NOT NULL,
+    event_type text NOT NULL,
+    state_key text,
+    origin_server_ts bigint,
+    content bytea NOT NULL,
+    is_processed boolean DEFAULT false NOT NULL
+);
+
+
+ALTER TABLE public.delayed_events OWNER TO synapse;
+
+--
+-- Name: delayed_events_stream_pos; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.delayed_events_stream_pos (
+    lock character(1) DEFAULT 'X'::bpchar NOT NULL,
+    stream_id bigint NOT NULL,
+    CONSTRAINT delayed_events_stream_pos_lock_check CHECK ((lock = 'X'::bpchar))
+);
+
+
+ALTER TABLE public.delayed_events_stream_pos OWNER TO synapse;
 
 --
 -- Name: deleted_pushers; Type: TABLE; Schema: public; Owner: synapse
@@ -289,7 +468,8 @@ CREATE TABLE public.deleted_pushers (
     stream_id bigint NOT NULL,
     app_id text NOT NULL,
     pushkey text NOT NULL,
-    user_id text NOT NULL
+    user_id text NOT NULL,
+    instance_name text
 );
 
 
@@ -297,6 +477,7 @@ ALTER TABLE public.deleted_pushers OWNER TO synapse;
 
 --
 -- Name: destination_health; Type: TABLE; Schema: public; Owner: synapse
+-- This table is required by topologiser.py
 --
 
 CREATE TABLE public.destination_health (
@@ -308,17 +489,122 @@ CREATE TABLE public.destination_health (
 ALTER TABLE public.destination_health OWNER TO synapse;
 
 --
+-- Name: destination_rooms; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.destination_rooms (
+    destination text NOT NULL,
+    room_id text NOT NULL,
+    stream_ordering bigint NOT NULL
+);
+
+
+ALTER TABLE public.destination_rooms OWNER TO synapse;
+
+--
+-- Name: TABLE destination_rooms; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON TABLE public.destination_rooms IS 'Information about transmission of PDUs in a given room to a given remote homeserver.';
+
+
+--
+-- Name: COLUMN destination_rooms.destination; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON COLUMN public.destination_rooms.destination IS 'server name of remote homeserver in question';
+
+
+--
+-- Name: COLUMN destination_rooms.room_id; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON COLUMN public.destination_rooms.room_id IS 'room ID in question';
+
+
+--
+-- Name: COLUMN destination_rooms.stream_ordering; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON COLUMN public.destination_rooms.stream_ordering IS '`stream_ordering` of the most recent PDU in this room that needs to be sent (by us) to this homeserver.
+This can only be pointing to our own PDU because we are only responsible for sending our own PDUs.';
+
+
+--
 -- Name: destinations; Type: TABLE; Schema: public; Owner: synapse
 --
 
 CREATE TABLE public.destinations (
     destination text NOT NULL,
     retry_last_ts bigint,
-    retry_interval integer
+    retry_interval bigint,
+    failure_ts bigint,
+    last_successful_stream_ordering bigint
 );
 
 
 ALTER TABLE public.destinations OWNER TO synapse;
+
+--
+-- Name: TABLE destinations; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON TABLE public.destinations IS 'Information about remote homeservers and the health of our connection to them.';
+
+
+--
+-- Name: COLUMN destinations.destination; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON COLUMN public.destinations.destination IS 'server name of remote homeserver in question';
+
+
+--
+-- Name: COLUMN destinations.retry_last_ts; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON COLUMN public.destinations.retry_last_ts IS 'The last time we tried and failed to reach the remote server, in ms.
+This field is reset to `0` when we succeed in connecting again.';
+
+
+--
+-- Name: COLUMN destinations.retry_interval; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON COLUMN public.destinations.retry_interval IS 'How long, in milliseconds, to wait since the last time we tried to reach the remote server before trying again.
+This field is reset to `0` when we succeed in connecting again.';
+
+
+--
+-- Name: COLUMN destinations.failure_ts; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON COLUMN public.destinations.failure_ts IS 'The first time we tried and failed to reach the remote server, in ms.
+This field is reset to `NULL` when we succeed in connecting again.';
+
+
+--
+-- Name: COLUMN destinations.last_successful_stream_ordering; Type: COMMENT; Schema: public; Owner: synapse
+--
+
+COMMENT ON COLUMN public.destinations.last_successful_stream_ordering IS 'Stream ordering of the most recently successfully sent PDU to this server, sent through normal send (not e.g. backfill).
+In Catch-Up Mode, the original PDU persisted by us is represented here, even if we sent a later forward extremity in its stead.
+See `destination_rooms` for more information about catch-up.';
+
+
+--
+-- Name: device_auth_providers; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.device_auth_providers (
+    user_id text NOT NULL,
+    device_id text NOT NULL,
+    auth_provider_id text NOT NULL,
+    auth_provider_session_id text NOT NULL
+);
+
+
+ALTER TABLE public.device_auth_providers OWNER TO synapse;
 
 --
 -- Name: device_federation_inbox; Type: TABLE; Schema: public; Owner: synapse
@@ -327,7 +613,8 @@ ALTER TABLE public.destinations OWNER TO synapse;
 CREATE TABLE public.device_federation_inbox (
     origin text NOT NULL,
     message_id text NOT NULL,
-    received_ts bigint NOT NULL
+    received_ts bigint NOT NULL,
+    instance_name text
 );
 
 
@@ -341,7 +628,8 @@ CREATE TABLE public.device_federation_outbox (
     destination text NOT NULL,
     stream_id bigint NOT NULL,
     queued_ts bigint NOT NULL,
-    messages_json text NOT NULL
+    messages_json text NOT NULL,
+    instance_name text
 );
 
 
@@ -355,11 +643,58 @@ CREATE TABLE public.device_inbox (
     user_id text NOT NULL,
     device_id text NOT NULL,
     stream_id bigint NOT NULL,
-    message_json text NOT NULL
+    message_json text NOT NULL,
+    instance_name text
 );
 
 
 ALTER TABLE public.device_inbox OWNER TO synapse;
+
+--
+-- Name: device_inbox_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.device_inbox_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.device_inbox_sequence OWNER TO synapse;
+
+--
+-- Name: device_lists_changes_converted_stream_position; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.device_lists_changes_converted_stream_position (
+    lock character(1) DEFAULT 'X'::bpchar NOT NULL,
+    stream_id bigint NOT NULL,
+    room_id text NOT NULL,
+    instance_name text,
+    CONSTRAINT device_lists_changes_converted_stream_position_lock_check CHECK ((lock = 'X'::bpchar))
+);
+
+
+ALTER TABLE public.device_lists_changes_converted_stream_position OWNER TO synapse;
+
+--
+-- Name: device_lists_changes_in_room; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.device_lists_changes_in_room (
+    user_id text NOT NULL,
+    device_id text NOT NULL,
+    room_id text NOT NULL,
+    stream_id bigint NOT NULL,
+    converted_to_destinations boolean NOT NULL,
+    opentracing_context text,
+    instance_name text
+);
+
+
+ALTER TABLE public.device_lists_changes_in_room OWNER TO synapse;
 
 --
 -- Name: device_lists_outbound_last_success; Type: TABLE; Schema: public; Owner: synapse
@@ -384,7 +719,9 @@ CREATE TABLE public.device_lists_outbound_pokes (
     user_id text NOT NULL,
     device_id text NOT NULL,
     sent boolean NOT NULL,
-    ts bigint NOT NULL
+    ts bigint NOT NULL,
+    opentracing_context text,
+    instance_name text
 );
 
 
@@ -416,28 +753,58 @@ CREATE TABLE public.device_lists_remote_extremeties (
 ALTER TABLE public.device_lists_remote_extremeties OWNER TO synapse;
 
 --
+-- Name: device_lists_remote_pending; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.device_lists_remote_pending (
+    stream_id bigint NOT NULL,
+    user_id text NOT NULL,
+    device_id text NOT NULL,
+    instance_name text
+);
+
+
+ALTER TABLE public.device_lists_remote_pending OWNER TO synapse;
+
+--
+-- Name: device_lists_remote_resync; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.device_lists_remote_resync (
+    user_id text NOT NULL,
+    added_ts bigint NOT NULL
+);
+
+
+ALTER TABLE public.device_lists_remote_resync OWNER TO synapse;
+
+--
+-- Name: device_lists_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.device_lists_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.device_lists_sequence OWNER TO synapse;
+
+--
 -- Name: device_lists_stream; Type: TABLE; Schema: public; Owner: synapse
 --
 
 CREATE TABLE public.device_lists_stream (
     stream_id bigint NOT NULL,
     user_id text NOT NULL,
-    device_id text NOT NULL
+    device_id text NOT NULL,
+    instance_name text
 );
 
 
 ALTER TABLE public.device_lists_stream OWNER TO synapse;
-
---
--- Name: device_max_stream_id; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.device_max_stream_id (
-    stream_id bigint NOT NULL
-);
-
-
-ALTER TABLE public.device_max_stream_id OWNER TO synapse;
 
 --
 -- Name: devices; Type: TABLE; Schema: public; Owner: synapse
@@ -446,11 +813,60 @@ ALTER TABLE public.device_max_stream_id OWNER TO synapse;
 CREATE TABLE public.devices (
     user_id text NOT NULL,
     device_id text NOT NULL,
-    display_name text
+    display_name text,
+    last_seen bigint,
+    ip text,
+    user_agent text,
+    hidden boolean DEFAULT false
 );
 
 
 ALTER TABLE public.devices OWNER TO synapse;
+
+--
+-- Name: e2e_cross_signing_keys; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.e2e_cross_signing_keys (
+    user_id text NOT NULL,
+    keytype text NOT NULL,
+    keydata text NOT NULL,
+    stream_id bigint NOT NULL,
+    updatable_without_uia_before_ms bigint,
+    instance_name text
+);
+
+
+ALTER TABLE public.e2e_cross_signing_keys OWNER TO synapse;
+
+--
+-- Name: e2e_cross_signing_keys_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.e2e_cross_signing_keys_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.e2e_cross_signing_keys_sequence OWNER TO synapse;
+
+--
+-- Name: e2e_cross_signing_signatures; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.e2e_cross_signing_signatures (
+    user_id text NOT NULL,
+    key_id text NOT NULL,
+    target_user_id text NOT NULL,
+    target_device_id text NOT NULL,
+    signature text NOT NULL
+);
+
+
+ALTER TABLE public.e2e_cross_signing_signatures OWNER TO synapse;
 
 --
 -- Name: e2e_device_keys_json; Type: TABLE; Schema: public; Owner: synapse
@@ -465,6 +881,22 @@ CREATE TABLE public.e2e_device_keys_json (
 
 
 ALTER TABLE public.e2e_device_keys_json OWNER TO synapse;
+
+--
+-- Name: e2e_fallback_keys_json; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.e2e_fallback_keys_json (
+    user_id text NOT NULL,
+    device_id text NOT NULL,
+    algorithm text NOT NULL,
+    key_id text NOT NULL,
+    key_json text NOT NULL,
+    used boolean DEFAULT false NOT NULL
+);
+
+
+ALTER TABLE public.e2e_fallback_keys_json OWNER TO synapse;
 
 --
 -- Name: e2e_one_time_keys_json; Type: TABLE; Schema: public; Owner: synapse
@@ -490,7 +922,7 @@ CREATE TABLE public.e2e_room_keys (
     user_id text NOT NULL,
     room_id text NOT NULL,
     session_id text NOT NULL,
-    version text NOT NULL,
+    version bigint NOT NULL,
     first_message_index integer,
     forwarded_count integer,
     is_verified boolean,
@@ -506,10 +938,11 @@ ALTER TABLE public.e2e_room_keys OWNER TO synapse;
 
 CREATE TABLE public.e2e_room_keys_versions (
     user_id text NOT NULL,
-    version text NOT NULL,
+    version bigint NOT NULL,
     algorithm text NOT NULL,
     auth_data text NOT NULL,
-    deleted smallint DEFAULT 0 NOT NULL
+    deleted smallint DEFAULT 0 NOT NULL,
+    etag bigint
 );
 
 
@@ -540,6 +973,63 @@ CREATE TABLE public.event_auth (
 ALTER TABLE public.event_auth OWNER TO synapse;
 
 --
+-- Name: event_auth_chain_id; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.event_auth_chain_id
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.event_auth_chain_id OWNER TO synapse;
+
+--
+-- Name: event_auth_chain_links; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.event_auth_chain_links (
+    origin_chain_id bigint NOT NULL,
+    origin_sequence_number bigint NOT NULL,
+    target_chain_id bigint NOT NULL,
+    target_sequence_number bigint NOT NULL
+);
+ALTER TABLE ONLY public.event_auth_chain_links ALTER COLUMN origin_chain_id SET (n_distinct=-0.5);
+ALTER TABLE ONLY public.event_auth_chain_links ALTER COLUMN target_chain_id SET (n_distinct=-0.5);
+
+
+ALTER TABLE public.event_auth_chain_links OWNER TO synapse;
+
+--
+-- Name: event_auth_chain_to_calculate; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.event_auth_chain_to_calculate (
+    event_id text NOT NULL,
+    room_id text NOT NULL,
+    type text NOT NULL,
+    state_key text NOT NULL
+);
+
+
+ALTER TABLE public.event_auth_chain_to_calculate OWNER TO synapse;
+
+--
+-- Name: event_auth_chains; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.event_auth_chains (
+    event_id text NOT NULL,
+    chain_id bigint NOT NULL,
+    sequence_number bigint NOT NULL
+);
+
+
+ALTER TABLE public.event_auth_chains OWNER TO synapse;
+
+--
 -- Name: event_backward_extremities; Type: TABLE; Schema: public; Owner: synapse
 --
 
@@ -552,58 +1042,45 @@ CREATE TABLE public.event_backward_extremities (
 ALTER TABLE public.event_backward_extremities OWNER TO synapse;
 
 --
--- Name: event_content_hashes; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.event_content_hashes (
-    event_id text,
-    algorithm text,
-    hash bytea
-);
-
-
-ALTER TABLE public.event_content_hashes OWNER TO synapse;
-
---
--- Name: event_destinations; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.event_destinations (
-    event_id text NOT NULL,
-    destination text NOT NULL,
-    delivered_ts bigint DEFAULT 0
-);
-
-
-ALTER TABLE public.event_destinations OWNER TO synapse;
-
---
--- Name: event_edge_hashes; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.event_edge_hashes (
-    event_id text,
-    prev_event_id text,
-    algorithm text,
-    hash bytea
-);
-
-
-ALTER TABLE public.event_edge_hashes OWNER TO synapse;
-
---
 -- Name: event_edges; Type: TABLE; Schema: public; Owner: synapse
 --
 
 CREATE TABLE public.event_edges (
     event_id text NOT NULL,
     prev_event_id text NOT NULL,
-    room_id text NOT NULL,
-    is_state boolean NOT NULL
+    room_id text,
+    is_state boolean DEFAULT false NOT NULL
 );
 
 
 ALTER TABLE public.event_edges OWNER TO synapse;
+
+--
+-- Name: event_expiry; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.event_expiry (
+    event_id text NOT NULL,
+    expiry_ts bigint NOT NULL
+);
+
+
+ALTER TABLE public.event_expiry OWNER TO synapse;
+
+--
+-- Name: event_failed_pull_attempts; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.event_failed_pull_attempts (
+    room_id text NOT NULL,
+    event_id text NOT NULL,
+    num_attempts integer NOT NULL,
+    last_attempt_ts bigint NOT NULL,
+    last_cause text NOT NULL
+);
+
+
+ALTER TABLE public.event_failed_pull_attempts OWNER TO synapse;
 
 --
 -- Name: event_forward_extremities; Type: TABLE; Schema: public; Owner: synapse
@@ -625,11 +1102,26 @@ CREATE TABLE public.event_json (
     event_id text NOT NULL,
     room_id text NOT NULL,
     internal_metadata text NOT NULL,
-    json text NOT NULL
+    json text NOT NULL,
+    format_version integer
 );
 
 
 ALTER TABLE public.event_json OWNER TO synapse;
+
+--
+-- Name: event_labels; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.event_labels (
+    event_id text NOT NULL,
+    label text NOT NULL,
+    room_id text NOT NULL,
+    topological_ordering bigint NOT NULL
+);
+
+
+ALTER TABLE public.event_labels OWNER TO synapse;
 
 --
 -- Name: event_push_actions; Type: TABLE; Schema: public; Owner: synapse
@@ -644,7 +1136,10 @@ CREATE TABLE public.event_push_actions (
     topological_ordering bigint,
     stream_ordering bigint,
     notif smallint,
-    highlight smallint
+    highlight smallint,
+    unread smallint,
+    thread_id text,
+    CONSTRAINT event_push_actions_thread_id CHECK ((thread_id IS NOT NULL))
 );
 
 
@@ -659,7 +1154,11 @@ CREATE TABLE public.event_push_actions_staging (
     user_id text NOT NULL,
     actions text NOT NULL,
     notif smallint NOT NULL,
-    highlight smallint NOT NULL
+    highlight smallint NOT NULL,
+    unread smallint,
+    thread_id text,
+    inserted_ts bigint DEFAULT (EXTRACT(epoch FROM now()) * (1000)::numeric),
+    CONSTRAINT event_push_actions_staging_thread_id CHECK ((thread_id IS NOT NULL))
 );
 
 
@@ -673,11 +1172,28 @@ CREATE TABLE public.event_push_summary (
     user_id text NOT NULL,
     room_id text NOT NULL,
     notif_count bigint NOT NULL,
-    stream_ordering bigint NOT NULL
+    stream_ordering bigint NOT NULL,
+    unread_count bigint,
+    last_receipt_stream_ordering bigint,
+    thread_id text,
+    CONSTRAINT event_push_summary_thread_id CHECK ((thread_id IS NOT NULL))
 );
 
 
 ALTER TABLE public.event_push_summary OWNER TO synapse;
+
+--
+-- Name: event_push_summary_last_receipt_stream_id; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.event_push_summary_last_receipt_stream_id (
+    lock character(1) DEFAULT 'X'::bpchar NOT NULL,
+    stream_id bigint NOT NULL,
+    CONSTRAINT event_push_summary_last_receipt_stream_id_lock_check CHECK ((lock = 'X'::bpchar))
+);
+
+
+ALTER TABLE public.event_push_summary_last_receipt_stream_id OWNER TO synapse;
 
 --
 -- Name: event_push_summary_stream_ordering; Type: TABLE; Schema: public; Owner: synapse
@@ -693,17 +1209,18 @@ CREATE TABLE public.event_push_summary_stream_ordering (
 ALTER TABLE public.event_push_summary_stream_ordering OWNER TO synapse;
 
 --
--- Name: event_reference_hashes; Type: TABLE; Schema: public; Owner: synapse
+-- Name: event_relations; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.event_reference_hashes (
-    event_id text,
-    algorithm text,
-    hash bytea
+CREATE TABLE public.event_relations (
+    event_id text NOT NULL,
+    relates_to_id text NOT NULL,
+    relation_type text NOT NULL,
+    aggregation_key text
 );
 
 
-ALTER TABLE public.event_reference_hashes OWNER TO synapse;
+ALTER TABLE public.event_relations OWNER TO synapse;
 
 --
 -- Name: event_reports; Type: TABLE; Schema: public; Owner: synapse
@@ -735,23 +1252,10 @@ CREATE TABLE public.event_search (
     origin_server_ts bigint,
     stream_ordering bigint
 );
+ALTER TABLE ONLY public.event_search ALTER COLUMN room_id SET (n_distinct=-0.01);
 
 
 ALTER TABLE public.event_search OWNER TO synapse;
-
---
--- Name: event_signatures; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.event_signatures (
-    event_id text,
-    signature_name text,
-    key_id text,
-    signature bytea
-);
-
-
-ALTER TABLE public.event_signatures OWNER TO synapse;
 
 --
 -- Name: event_to_state_groups; Type: TABLE; Schema: public; Owner: synapse
@@ -766,11 +1270,26 @@ CREATE TABLE public.event_to_state_groups (
 ALTER TABLE public.event_to_state_groups OWNER TO synapse;
 
 --
+-- Name: event_txn_id_device_id; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.event_txn_id_device_id (
+    event_id text NOT NULL,
+    room_id text NOT NULL,
+    user_id text NOT NULL,
+    device_id text NOT NULL,
+    txn_id text NOT NULL,
+    inserted_ts bigint NOT NULL
+);
+
+
+ALTER TABLE public.event_txn_id_device_id OWNER TO synapse;
+
+--
 -- Name: events; Type: TABLE; Schema: public; Owner: synapse
 --
 
 CREATE TABLE public.events (
-    stream_ordering integer NOT NULL,
     topological_ordering bigint NOT NULL,
     event_id text NOT NULL,
     type text NOT NULL,
@@ -784,11 +1303,42 @@ CREATE TABLE public.events (
     received_ts bigint,
     sender text,
     contains_url boolean,
-    thread_id bigint DEFAULT 0 NOT NULL
+    instance_name text,
+    stream_ordering bigint,
+    state_key text,
+    rejection_reason text
 );
 
 
 ALTER TABLE public.events OWNER TO synapse;
+
+--
+-- Name: events_backfill_stream_seq; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.events_backfill_stream_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.events_backfill_stream_seq OWNER TO synapse;
+
+--
+-- Name: events_stream_seq; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.events_stream_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.events_stream_seq OWNER TO synapse;
 
 --
 -- Name: ex_outlier_stream; Type: TABLE; Schema: public; Owner: synapse
@@ -797,11 +1347,28 @@ ALTER TABLE public.events OWNER TO synapse;
 CREATE TABLE public.ex_outlier_stream (
     event_stream_ordering bigint NOT NULL,
     event_id text NOT NULL,
-    state_group bigint NOT NULL
+    state_group bigint NOT NULL,
+    instance_name text
 );
 
 
 ALTER TABLE public.ex_outlier_stream OWNER TO synapse;
+
+--
+-- Name: federation_inbound_events_staging; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.federation_inbound_events_staging (
+    origin text NOT NULL,
+    room_id text NOT NULL,
+    event_id text NOT NULL,
+    received_ts bigint NOT NULL,
+    event_json text NOT NULL,
+    internal_metadata text NOT NULL
+);
+
+
+ALTER TABLE public.federation_inbound_events_staging OWNER TO synapse;
 
 --
 -- Name: federation_stream_position; Type: TABLE; Schema: public; Owner: synapse
@@ -809,270 +1376,73 @@ ALTER TABLE public.ex_outlier_stream OWNER TO synapse;
 
 CREATE TABLE public.federation_stream_position (
     type text NOT NULL,
-    stream_id integer NOT NULL
+    stream_id bigint NOT NULL,
+    instance_name text DEFAULT 'master'::text NOT NULL
 );
 
 
 ALTER TABLE public.federation_stream_position OWNER TO synapse;
 
 --
--- Name: feedback; Type: TABLE; Schema: public; Owner: synapse
+-- Name: ignored_users; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.feedback (
+CREATE TABLE public.ignored_users (
+    ignorer_user_id text NOT NULL,
+    ignored_user_id text NOT NULL
+);
+
+
+ALTER TABLE public.ignored_users OWNER TO synapse;
+
+--
+-- Name: instance_map; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.instance_map (
+    instance_id integer NOT NULL,
+    instance_name text NOT NULL
+);
+
+
+ALTER TABLE public.instance_map OWNER TO synapse;
+
+--
+-- Name: instance_map_instance_id_seq; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.instance_map_instance_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.instance_map_instance_id_seq OWNER TO synapse;
+
+--
+-- Name: instance_map_instance_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: synapse
+--
+
+ALTER SEQUENCE public.instance_map_instance_id_seq OWNED BY public.instance_map.instance_id;
+
+
+--
+-- Name: local_current_membership; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.local_current_membership (
+    room_id text NOT NULL,
+    user_id text NOT NULL,
     event_id text NOT NULL,
-    feedback_type text,
-    target_event_id text,
-    sender text,
-    room_id text
-);
-
-
-ALTER TABLE public.feedback OWNER TO synapse;
-
---
--- Name: group_attestations_remote; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_attestations_remote (
-    group_id text NOT NULL,
-    user_id text NOT NULL,
-    valid_until_ms bigint NOT NULL,
-    attestation_json text NOT NULL
-);
-
-
-ALTER TABLE public.group_attestations_remote OWNER TO synapse;
-
---
--- Name: group_attestations_renewals; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_attestations_renewals (
-    group_id text NOT NULL,
-    user_id text NOT NULL,
-    valid_until_ms bigint NOT NULL
-);
-
-
-ALTER TABLE public.group_attestations_renewals OWNER TO synapse;
-
---
--- Name: group_invites; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_invites (
-    group_id text NOT NULL,
-    user_id text NOT NULL
-);
-
-
-ALTER TABLE public.group_invites OWNER TO synapse;
-
---
--- Name: group_roles; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_roles (
-    group_id text NOT NULL,
-    role_id text NOT NULL,
-    profile text NOT NULL,
-    is_public boolean NOT NULL
-);
-
-
-ALTER TABLE public.group_roles OWNER TO synapse;
-
---
--- Name: group_room_categories; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_room_categories (
-    group_id text NOT NULL,
-    category_id text NOT NULL,
-    profile text NOT NULL,
-    is_public boolean NOT NULL
-);
-
-
-ALTER TABLE public.group_room_categories OWNER TO synapse;
-
---
--- Name: group_rooms; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_rooms (
-    group_id text NOT NULL,
-    room_id text NOT NULL,
-    is_public boolean NOT NULL
-);
-
-
-ALTER TABLE public.group_rooms OWNER TO synapse;
-
---
--- Name: group_summary_roles; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_summary_roles (
-    group_id text NOT NULL,
-    role_id text NOT NULL,
-    role_order bigint NOT NULL,
-    CONSTRAINT group_summary_roles_role_order_check CHECK ((role_order > 0))
-);
-
-
-ALTER TABLE public.group_summary_roles OWNER TO synapse;
-
---
--- Name: group_summary_room_categories; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_summary_room_categories (
-    group_id text NOT NULL,
-    category_id text NOT NULL,
-    cat_order bigint NOT NULL,
-    CONSTRAINT group_summary_room_categories_cat_order_check CHECK ((cat_order > 0))
-);
-
-
-ALTER TABLE public.group_summary_room_categories OWNER TO synapse;
-
---
--- Name: group_summary_rooms; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_summary_rooms (
-    group_id text NOT NULL,
-    room_id text NOT NULL,
-    category_id text NOT NULL,
-    room_order bigint NOT NULL,
-    is_public boolean NOT NULL,
-    CONSTRAINT group_summary_rooms_room_order_check CHECK ((room_order > 0))
-);
-
-
-ALTER TABLE public.group_summary_rooms OWNER TO synapse;
-
---
--- Name: group_summary_users; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_summary_users (
-    group_id text NOT NULL,
-    user_id text NOT NULL,
-    role_id text NOT NULL,
-    user_order bigint NOT NULL,
-    is_public boolean NOT NULL
-);
-
-
-ALTER TABLE public.group_summary_users OWNER TO synapse;
-
---
--- Name: group_users; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.group_users (
-    group_id text NOT NULL,
-    user_id text NOT NULL,
-    is_admin boolean NOT NULL,
-    is_public boolean NOT NULL
-);
-
-
-ALTER TABLE public.group_users OWNER TO synapse;
-
---
--- Name: groups; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.groups (
-    group_id text NOT NULL,
-    name text,
-    avatar_url text,
-    short_description text,
-    long_description text,
-    is_public boolean NOT NULL,
-    join_policy text DEFAULT 'invite'::text NOT NULL
-);
-
-
-ALTER TABLE public.groups OWNER TO synapse;
-
---
--- Name: guest_access; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.guest_access (
-    event_id text NOT NULL,
-    room_id text NOT NULL,
-    guest_access text NOT NULL
-);
-
-
-ALTER TABLE public.guest_access OWNER TO synapse;
-
---
--- Name: history_visibility; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.history_visibility (
-    event_id text NOT NULL,
-    room_id text NOT NULL,
-    history_visibility text NOT NULL
-);
-
-
-ALTER TABLE public.history_visibility OWNER TO synapse;
-
---
--- Name: local_group_membership; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.local_group_membership (
-    group_id text NOT NULL,
-    user_id text NOT NULL,
-    is_admin boolean NOT NULL,
     membership text NOT NULL,
-    is_publicised boolean NOT NULL,
-    content text NOT NULL
+    event_stream_ordering bigint
 );
 
 
-ALTER TABLE public.local_group_membership OWNER TO synapse;
-
---
--- Name: local_group_updates; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.local_group_updates (
-    stream_id bigint NOT NULL,
-    group_id text NOT NULL,
-    user_id text NOT NULL,
-    type text NOT NULL,
-    content text NOT NULL
-);
-
-
-ALTER TABLE public.local_group_updates OWNER TO synapse;
-
---
--- Name: local_invites; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.local_invites (
-    stream_id bigint NOT NULL,
-    inviter text NOT NULL,
-    invitee text NOT NULL,
-    event_id text NOT NULL,
-    room_id text NOT NULL,
-    locally_rejected text,
-    replaced_by text
-);
-
-
-ALTER TABLE public.local_invites OWNER TO synapse;
+ALTER TABLE public.local_current_membership OWNER TO synapse;
 
 --
 -- Name: local_media_repository; Type: TABLE; Schema: public; Owner: synapse
@@ -1087,7 +1457,9 @@ CREATE TABLE public.local_media_repository (
     user_id text,
     quarantined_by text,
     url_cache text,
-    last_access_ts bigint
+    last_access_ts bigint,
+    safe_from_quarantine boolean DEFAULT false NOT NULL,
+    authenticated boolean DEFAULT false NOT NULL
 );
 
 
@@ -1127,6 +1499,22 @@ CREATE TABLE public.local_media_repository_url_cache (
 ALTER TABLE public.local_media_repository_url_cache OWNER TO synapse;
 
 --
+-- Name: login_tokens; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.login_tokens (
+    token text NOT NULL,
+    user_id text NOT NULL,
+    expiry_ts bigint NOT NULL,
+    used_ts bigint,
+    auth_provider_id text,
+    auth_provider_session_id text
+);
+
+
+ALTER TABLE public.login_tokens OWNER TO synapse;
+
+--
 -- Name: monthly_active_users; Type: TABLE; Schema: public; Owner: synapse
 --
 
@@ -1152,43 +1540,55 @@ CREATE TABLE public.open_id_tokens (
 ALTER TABLE public.open_id_tokens OWNER TO synapse;
 
 --
--- Name: presence; Type: TABLE; Schema: public; Owner: synapse
+-- Name: partial_state_events; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.presence (
+CREATE TABLE public.partial_state_events (
+    room_id text NOT NULL,
+    event_id text NOT NULL
+);
+
+
+ALTER TABLE public.partial_state_events OWNER TO synapse;
+
+--
+-- Name: partial_state_rooms; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.partial_state_rooms (
+    room_id text NOT NULL,
+    device_lists_stream_id bigint DEFAULT 0 NOT NULL,
+    join_event_id text,
+    joined_via text
+);
+
+
+ALTER TABLE public.partial_state_rooms OWNER TO synapse;
+
+--
+-- Name: partial_state_rooms_servers; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.partial_state_rooms_servers (
+    room_id text NOT NULL,
+    server_name text NOT NULL
+);
+
+
+ALTER TABLE public.partial_state_rooms_servers OWNER TO synapse;
+
+--
+-- Name: per_user_experimental_features; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.per_user_experimental_features (
     user_id text NOT NULL,
-    state character varying(20),
-    status_msg text,
-    mtime bigint
+    feature text NOT NULL,
+    enabled boolean DEFAULT false
 );
 
 
-ALTER TABLE public.presence OWNER TO synapse;
-
---
--- Name: presence_allow_inbound; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.presence_allow_inbound (
-    observed_user_id text NOT NULL,
-    observer_user_id text NOT NULL
-);
-
-
-ALTER TABLE public.presence_allow_inbound OWNER TO synapse;
-
---
--- Name: presence_list; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.presence_list (
-    user_id text NOT NULL,
-    observed_user_id text NOT NULL,
-    accepted boolean NOT NULL
-);
-
-
-ALTER TABLE public.presence_list OWNER TO synapse;
+ALTER TABLE public.per_user_experimental_features OWNER TO synapse;
 
 --
 -- Name: presence_stream; Type: TABLE; Schema: public; Owner: synapse
@@ -1202,11 +1602,26 @@ CREATE TABLE public.presence_stream (
     last_federation_update_ts bigint,
     last_user_sync_ts bigint,
     status_msg text,
-    currently_active boolean
+    currently_active boolean,
+    instance_name text
 );
 
 
 ALTER TABLE public.presence_stream OWNER TO synapse;
+
+--
+-- Name: presence_stream_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.presence_stream_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.presence_stream_sequence OWNER TO synapse;
 
 --
 -- Name: profiles; Type: TABLE; Schema: public; Owner: synapse
@@ -1215,26 +1630,13 @@ ALTER TABLE public.presence_stream OWNER TO synapse;
 CREATE TABLE public.profiles (
     user_id text NOT NULL,
     displayname text,
-    avatar_url text
+    avatar_url text,
+    full_user_id text,
+    CONSTRAINT full_user_id_not_null CHECK ((full_user_id IS NOT NULL))
 );
 
 
 ALTER TABLE public.profiles OWNER TO synapse;
-
---
--- Name: public_room_list_stream; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.public_room_list_stream (
-    stream_id bigint NOT NULL,
-    room_id text NOT NULL,
-    visibility boolean NOT NULL,
-    appservice_id text,
-    network_id text
-);
-
-
-ALTER TABLE public.public_room_list_stream OWNER TO synapse;
 
 --
 -- Name: push_rules; Type: TABLE; Schema: public; Owner: synapse
@@ -1280,11 +1682,26 @@ CREATE TABLE public.push_rules_stream (
     priority_class smallint,
     priority integer,
     conditions text,
-    actions text
+    actions text,
+    instance_name text
 );
 
 
 ALTER TABLE public.push_rules_stream OWNER TO synapse;
+
+--
+-- Name: push_rules_stream_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.push_rules_stream_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.push_rules_stream_sequence OWNER TO synapse;
 
 --
 -- Name: pusher_throttle; Type: TABLE; Schema: public; Owner: synapse
@@ -1317,13 +1734,30 @@ CREATE TABLE public.pushers (
     ts bigint NOT NULL,
     lang text,
     data text,
-    last_stream_ordering integer,
+    last_stream_ordering bigint,
     last_success bigint,
-    failing_since bigint
+    failing_since bigint,
+    enabled boolean,
+    device_id text,
+    instance_name text
 );
 
 
 ALTER TABLE public.pushers OWNER TO synapse;
+
+--
+-- Name: pushers_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.pushers_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.pushers_sequence OWNER TO synapse;
 
 --
 -- Name: ratelimit_override; Type: TABLE; Schema: public; Owner: synapse
@@ -1347,7 +1781,8 @@ CREATE TABLE public.receipts_graph (
     receipt_type text NOT NULL,
     user_id text NOT NULL,
     event_ids text NOT NULL,
-    data text NOT NULL
+    data text NOT NULL,
+    thread_id text
 );
 
 
@@ -1363,11 +1798,28 @@ CREATE TABLE public.receipts_linearized (
     receipt_type text NOT NULL,
     user_id text NOT NULL,
     event_id text NOT NULL,
-    data text NOT NULL
+    data text NOT NULL,
+    instance_name text,
+    event_stream_ordering bigint,
+    thread_id text
 );
 
 
 ALTER TABLE public.receipts_linearized OWNER TO synapse;
+
+--
+-- Name: receipts_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.receipts_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.receipts_sequence OWNER TO synapse;
 
 --
 -- Name: received_transactions; Type: TABLE; Schema: public; Owner: synapse
@@ -1391,11 +1843,45 @@ ALTER TABLE public.received_transactions OWNER TO synapse;
 
 CREATE TABLE public.redactions (
     event_id text NOT NULL,
-    redacts text NOT NULL
+    redacts text NOT NULL,
+    have_censored boolean DEFAULT false NOT NULL,
+    received_ts bigint
 );
 
 
 ALTER TABLE public.redactions OWNER TO synapse;
+
+--
+-- Name: refresh_tokens; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.refresh_tokens (
+    id bigint NOT NULL,
+    user_id text NOT NULL,
+    device_id text NOT NULL,
+    token text NOT NULL,
+    next_token_id bigint,
+    expiry_ts bigint,
+    ultimate_session_expiry_ts bigint
+);
+
+
+ALTER TABLE public.refresh_tokens OWNER TO synapse;
+
+--
+-- Name: registration_tokens; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.registration_tokens (
+    token text NOT NULL,
+    uses_allowed integer,
+    pending integer NOT NULL,
+    completed integer NOT NULL,
+    expiry_time bigint
+);
+
+
+ALTER TABLE public.registration_tokens OWNER TO synapse;
 
 --
 -- Name: rejections; Type: TABLE; Schema: public; Owner: synapse
@@ -1423,7 +1909,8 @@ CREATE TABLE public.remote_media_cache (
     media_length integer,
     filesystem_id text,
     last_access_ts bigint,
-    quarantined_by text
+    quarantined_by text,
+    authenticated boolean DEFAULT false NOT NULL
 );
 
 
@@ -1448,20 +1935,6 @@ CREATE TABLE public.remote_media_cache_thumbnails (
 ALTER TABLE public.remote_media_cache_thumbnails OWNER TO synapse;
 
 --
--- Name: remote_profile_cache; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.remote_profile_cache (
-    user_id text NOT NULL,
-    displayname text,
-    avatar_url text,
-    last_check bigint NOT NULL
-);
-
-
-ALTER TABLE public.remote_profile_cache OWNER TO synapse;
-
---
 -- Name: room_account_data; Type: TABLE; Schema: public; Owner: synapse
 --
 
@@ -1470,7 +1943,8 @@ CREATE TABLE public.room_account_data (
     room_id text NOT NULL,
     account_data_type text NOT NULL,
     stream_id bigint NOT NULL,
-    content text NOT NULL
+    content text NOT NULL,
+    instance_name text
 );
 
 
@@ -1507,23 +1981,24 @@ ALTER TABLE public.room_aliases OWNER TO synapse;
 
 CREATE TABLE public.room_depth (
     room_id text NOT NULL,
-    min_depth integer NOT NULL
+    min_depth bigint
 );
 
 
 ALTER TABLE public.room_depth OWNER TO synapse;
 
 --
--- Name: room_hosts; Type: TABLE; Schema: public; Owner: synapse
+-- Name: room_forgetter_stream_pos; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.room_hosts (
-    room_id text NOT NULL,
-    host text NOT NULL
+CREATE TABLE public.room_forgetter_stream_pos (
+    lock character(1) DEFAULT 'X'::bpchar NOT NULL,
+    stream_id bigint NOT NULL,
+    CONSTRAINT room_forgetter_stream_pos_lock_check CHECK ((lock = 'X'::bpchar))
 );
 
 
-ALTER TABLE public.room_hosts OWNER TO synapse;
+ALTER TABLE public.room_forgetter_stream_pos OWNER TO synapse;
 
 --
 -- Name: room_memberships; Type: TABLE; Schema: public; Owner: synapse
@@ -1537,24 +2012,93 @@ CREATE TABLE public.room_memberships (
     membership text NOT NULL,
     forgotten integer DEFAULT 0,
     display_name text,
-    avatar_url text
+    avatar_url text,
+    event_stream_ordering bigint
 );
 
 
 ALTER TABLE public.room_memberships OWNER TO synapse;
 
 --
--- Name: room_names; Type: TABLE; Schema: public; Owner: synapse
+-- Name: room_reports; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.room_names (
-    event_id text NOT NULL,
+CREATE TABLE public.room_reports (
+    id bigint NOT NULL,
+    received_ts bigint NOT NULL,
     room_id text NOT NULL,
-    name text NOT NULL
+    user_id text NOT NULL,
+    reason text NOT NULL
 );
 
 
-ALTER TABLE public.room_names OWNER TO synapse;
+ALTER TABLE public.room_reports OWNER TO synapse;
+
+--
+-- Name: room_retention; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.room_retention (
+    room_id text NOT NULL,
+    event_id text NOT NULL,
+    min_lifetime bigint,
+    max_lifetime bigint
+);
+
+
+ALTER TABLE public.room_retention OWNER TO synapse;
+
+--
+-- Name: room_stats_current; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.room_stats_current (
+    room_id text NOT NULL,
+    current_state_events integer NOT NULL,
+    joined_members integer NOT NULL,
+    invited_members integer NOT NULL,
+    left_members integer NOT NULL,
+    banned_members integer NOT NULL,
+    local_users_in_room integer NOT NULL,
+    completed_delta_stream_id bigint NOT NULL,
+    knocked_members integer
+);
+
+
+ALTER TABLE public.room_stats_current OWNER TO synapse;
+
+--
+-- Name: room_stats_earliest_token; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.room_stats_earliest_token (
+    room_id text NOT NULL,
+    token bigint NOT NULL
+);
+
+
+ALTER TABLE public.room_stats_earliest_token OWNER TO synapse;
+
+--
+-- Name: room_stats_state; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.room_stats_state (
+    room_id text NOT NULL,
+    name text,
+    canonical_alias text,
+    join_rules text,
+    history_visibility text,
+    encryption text,
+    avatar text,
+    guest_access text,
+    is_federatable boolean,
+    topic text,
+    room_type text
+);
+
+
+ALTER TABLE public.room_stats_state OWNER TO synapse;
 
 --
 -- Name: room_tags; Type: TABLE; Schema: public; Owner: synapse
@@ -1577,7 +2121,8 @@ ALTER TABLE public.room_tags OWNER TO synapse;
 CREATE TABLE public.room_tags_revisions (
     user_id text NOT NULL,
     room_id text NOT NULL,
-    stream_id bigint NOT NULL
+    stream_id bigint NOT NULL,
+    instance_name text
 );
 
 
@@ -1590,11 +2135,44 @@ ALTER TABLE public.room_tags_revisions OWNER TO synapse;
 CREATE TABLE public.rooms (
     room_id text NOT NULL,
     is_public boolean,
-    creator text
+    creator text,
+    room_version text,
+    has_auth_chain_index boolean
 );
 
 
 ALTER TABLE public.rooms OWNER TO synapse;
+
+--
+-- Name: scheduled_tasks; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.scheduled_tasks (
+    id text NOT NULL,
+    action text NOT NULL,
+    status text NOT NULL,
+    "timestamp" bigint NOT NULL,
+    resource_id text,
+    params text,
+    result text,
+    error text
+);
+
+
+ALTER TABLE public.scheduled_tasks OWNER TO synapse;
+
+--
+-- Name: schema_compat_version; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.schema_compat_version (
+    lock character(1) DEFAULT 'X'::bpchar NOT NULL,
+    compat_version integer NOT NULL,
+    CONSTRAINT schema_compat_version_lock_check CHECK ((lock = 'X'::bpchar))
+);
+
+
+ALTER TABLE public.schema_compat_version OWNER TO synapse;
 
 --
 -- Name: schema_version; Type: TABLE; Schema: public; Owner: synapse
@@ -1609,22 +2187,6 @@ CREATE TABLE public.schema_version (
 
 
 ALTER TABLE public.schema_version OWNER TO synapse;
-
---
--- Name: sent_transactions; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.sent_transactions (
-    id bigint NOT NULL,
-    transaction_id text,
-    destination text,
-    response_code integer DEFAULT 0,
-    response_json text,
-    ts bigint
-);
-
-
-ALTER TABLE public.sent_transactions OWNER TO synapse;
 
 --
 -- Name: server_keys_json; Type: TABLE; Schema: public; Owner: synapse
@@ -1651,26 +2213,189 @@ CREATE TABLE public.server_signature_keys (
     key_id text,
     from_server text,
     ts_added_ms bigint,
-    verify_key bytea
+    verify_key bytea,
+    ts_valid_until_ms bigint
 );
 
 
 ALTER TABLE public.server_signature_keys OWNER TO synapse;
 
 --
--- Name: server_tls_certificates; Type: TABLE; Schema: public; Owner: synapse
+-- Name: sessions; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.server_tls_certificates (
-    server_name text,
-    fingerprint text,
-    from_server text,
-    ts_added_ms bigint,
-    tls_certificate bytea
+CREATE TABLE public.sessions (
+    session_type text NOT NULL,
+    session_id text NOT NULL,
+    value text NOT NULL,
+    expiry_time_ms bigint NOT NULL
 );
 
 
-ALTER TABLE public.server_tls_certificates OWNER TO synapse;
+ALTER TABLE public.sessions OWNER TO synapse;
+
+--
+-- Name: sliding_sync_connection_positions; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.sliding_sync_connection_positions (
+    connection_position bigint NOT NULL,
+    connection_key bigint NOT NULL,
+    created_ts bigint NOT NULL
+);
+
+
+ALTER TABLE public.sliding_sync_connection_positions OWNER TO synapse;
+
+--
+-- Name: sliding_sync_connection_positions_connection_position_seq; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+ALTER TABLE public.sliding_sync_connection_positions ALTER COLUMN connection_position ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.sliding_sync_connection_positions_connection_position_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: sliding_sync_connection_required_state; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.sliding_sync_connection_required_state (
+    required_state_id bigint NOT NULL,
+    connection_key bigint NOT NULL,
+    required_state text NOT NULL
+);
+
+
+ALTER TABLE public.sliding_sync_connection_required_state OWNER TO synapse;
+
+--
+-- Name: sliding_sync_connection_required_state_required_state_id_seq; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+ALTER TABLE public.sliding_sync_connection_required_state ALTER COLUMN required_state_id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.sliding_sync_connection_required_state_required_state_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: sliding_sync_connection_room_configs; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.sliding_sync_connection_room_configs (
+    connection_position bigint NOT NULL,
+    room_id text NOT NULL,
+    timeline_limit bigint NOT NULL,
+    required_state_id bigint NOT NULL
+);
+
+
+ALTER TABLE public.sliding_sync_connection_room_configs OWNER TO synapse;
+
+--
+-- Name: sliding_sync_connection_streams; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.sliding_sync_connection_streams (
+    connection_position bigint NOT NULL,
+    stream text NOT NULL,
+    room_id text NOT NULL,
+    room_status text NOT NULL,
+    last_token text
+);
+
+
+ALTER TABLE public.sliding_sync_connection_streams OWNER TO synapse;
+
+--
+-- Name: sliding_sync_connections; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.sliding_sync_connections (
+    connection_key bigint NOT NULL,
+    user_id text NOT NULL,
+    effective_device_id text NOT NULL,
+    conn_id text NOT NULL,
+    created_ts bigint NOT NULL
+);
+
+
+ALTER TABLE public.sliding_sync_connections OWNER TO synapse;
+
+--
+-- Name: sliding_sync_connections_connection_key_seq; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+ALTER TABLE public.sliding_sync_connections ALTER COLUMN connection_key ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.sliding_sync_connections_connection_key_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: sliding_sync_joined_rooms; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.sliding_sync_joined_rooms (
+    room_id text NOT NULL,
+    event_stream_ordering bigint NOT NULL,
+    bump_stamp bigint,
+    room_type text,
+    room_name text,
+    is_encrypted boolean DEFAULT false NOT NULL,
+    tombstone_successor_room_id text
+);
+
+
+ALTER TABLE public.sliding_sync_joined_rooms OWNER TO synapse;
+
+--
+-- Name: sliding_sync_joined_rooms_to_recalculate; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.sliding_sync_joined_rooms_to_recalculate (
+    room_id text NOT NULL
+);
+
+
+ALTER TABLE public.sliding_sync_joined_rooms_to_recalculate OWNER TO synapse;
+
+--
+-- Name: sliding_sync_membership_snapshots; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.sliding_sync_membership_snapshots (
+    room_id text NOT NULL,
+    user_id text NOT NULL,
+    sender text NOT NULL,
+    membership_event_id text NOT NULL,
+    membership text NOT NULL,
+    forgotten integer DEFAULT 0 NOT NULL,
+    event_stream_ordering bigint NOT NULL,
+    event_instance_name text NOT NULL,
+    has_known_state boolean DEFAULT false NOT NULL,
+    room_type text,
+    room_name text,
+    is_encrypted boolean DEFAULT false NOT NULL,
+    tombstone_successor_room_id text
+);
+
+
+ALTER TABLE public.sliding_sync_membership_snapshots OWNER TO synapse;
 
 --
 -- Name: state_events; Type: TABLE; Schema: public; Owner: synapse
@@ -1686,20 +2411,6 @@ CREATE TABLE public.state_events (
 
 
 ALTER TABLE public.state_events OWNER TO synapse;
-
---
--- Name: state_forward_extremities; Type: TABLE; Schema: public; Owner: synapse
---
-
-CREATE TABLE public.state_forward_extremities (
-    event_id text NOT NULL,
-    room_id text NOT NULL,
-    type text NOT NULL,
-    state_key text NOT NULL
-);
-
-
-ALTER TABLE public.state_forward_extremities OWNER TO synapse;
 
 --
 -- Name: state_group_edges; Type: TABLE; Schema: public; Owner: synapse
@@ -1751,21 +2462,23 @@ CREATE TABLE public.state_groups_state (
     state_key text NOT NULL,
     event_id text NOT NULL
 );
+ALTER TABLE ONLY public.state_groups_state ALTER COLUMN state_group SET (n_distinct=-0.02);
 
 
 ALTER TABLE public.state_groups_state OWNER TO synapse;
 
 --
--- Name: stats_reporting; Type: TABLE; Schema: public; Owner: synapse
+-- Name: stats_incremental_position; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.stats_reporting (
-    reported_stream_token integer,
-    reported_time bigint
+CREATE TABLE public.stats_incremental_position (
+    lock character(1) DEFAULT 'X'::bpchar NOT NULL,
+    stream_id bigint NOT NULL,
+    CONSTRAINT stats_incremental_position_lock_check CHECK ((lock = 'X'::bpchar))
 );
 
 
-ALTER TABLE public.stats_reporting OWNER TO synapse;
+ALTER TABLE public.stats_incremental_position OWNER TO synapse;
 
 --
 -- Name: stream_ordering_to_exterm; Type: TABLE; Schema: public; Owner: synapse
@@ -1779,6 +2492,34 @@ CREATE TABLE public.stream_ordering_to_exterm (
 
 
 ALTER TABLE public.stream_ordering_to_exterm OWNER TO synapse;
+
+--
+-- Name: stream_positions; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.stream_positions (
+    stream_name text NOT NULL,
+    instance_name text NOT NULL,
+    stream_id bigint NOT NULL
+);
+
+
+ALTER TABLE public.stream_positions OWNER TO synapse;
+
+--
+-- Name: threads; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.threads (
+    room_id text NOT NULL,
+    thread_id text NOT NULL,
+    latest_event_id text NOT NULL,
+    topological_ordering bigint NOT NULL,
+    stream_ordering bigint NOT NULL
+);
+
+
+ALTER TABLE public.threads OWNER TO synapse;
 
 --
 -- Name: threepid_guest_access_tokens; Type: TABLE; Schema: public; Owner: synapse
@@ -1795,31 +2536,145 @@ CREATE TABLE public.threepid_guest_access_tokens (
 ALTER TABLE public.threepid_guest_access_tokens OWNER TO synapse;
 
 --
--- Name: topics; Type: TABLE; Schema: public; Owner: synapse
+-- Name: threepid_validation_session; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.topics (
-    event_id text NOT NULL,
+CREATE TABLE public.threepid_validation_session (
+    session_id text NOT NULL,
+    medium text NOT NULL,
+    address text NOT NULL,
+    client_secret text NOT NULL,
+    last_send_attempt bigint NOT NULL,
+    validated_at bigint
+);
+
+
+ALTER TABLE public.threepid_validation_session OWNER TO synapse;
+
+--
+-- Name: threepid_validation_token; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.threepid_validation_token (
+    token text NOT NULL,
+    session_id text NOT NULL,
+    next_link text,
+    expires bigint NOT NULL
+);
+
+
+ALTER TABLE public.threepid_validation_token OWNER TO synapse;
+
+--
+-- Name: timeline_gaps; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.timeline_gaps (
     room_id text NOT NULL,
-    topic text NOT NULL
+    instance_name text NOT NULL,
+    stream_ordering bigint NOT NULL
 );
 
 
-ALTER TABLE public.topics OWNER TO synapse;
+ALTER TABLE public.timeline_gaps OWNER TO synapse;
 
 --
--- Name: transaction_id_to_pdu; Type: TABLE; Schema: public; Owner: synapse
+-- Name: ui_auth_sessions; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.transaction_id_to_pdu (
-    transaction_id integer,
-    destination text,
-    pdu_id text,
-    pdu_origin text
+CREATE TABLE public.ui_auth_sessions (
+    session_id text NOT NULL,
+    creation_time bigint NOT NULL,
+    serverdict text NOT NULL,
+    clientdict text NOT NULL,
+    uri text NOT NULL,
+    method text NOT NULL,
+    description text NOT NULL
 );
 
 
-ALTER TABLE public.transaction_id_to_pdu OWNER TO synapse;
+ALTER TABLE public.ui_auth_sessions OWNER TO synapse;
+
+--
+-- Name: ui_auth_sessions_credentials; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.ui_auth_sessions_credentials (
+    session_id text NOT NULL,
+    stage_type text NOT NULL,
+    result text NOT NULL
+);
+
+
+ALTER TABLE public.ui_auth_sessions_credentials OWNER TO synapse;
+
+--
+-- Name: ui_auth_sessions_ips; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.ui_auth_sessions_ips (
+    session_id text NOT NULL,
+    ip text NOT NULL,
+    user_agent text NOT NULL
+);
+
+
+ALTER TABLE public.ui_auth_sessions_ips OWNER TO synapse;
+
+--
+-- Name: un_partial_stated_event_stream; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.un_partial_stated_event_stream (
+    stream_id bigint NOT NULL,
+    instance_name text NOT NULL,
+    event_id text NOT NULL,
+    rejection_status_changed boolean NOT NULL
+);
+
+
+ALTER TABLE public.un_partial_stated_event_stream OWNER TO synapse;
+
+--
+-- Name: un_partial_stated_event_stream_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.un_partial_stated_event_stream_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.un_partial_stated_event_stream_sequence OWNER TO synapse;
+
+--
+-- Name: un_partial_stated_room_stream; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.un_partial_stated_room_stream (
+    stream_id bigint NOT NULL,
+    instance_name text NOT NULL,
+    room_id text NOT NULL
+);
+
+
+ALTER TABLE public.un_partial_stated_room_stream OWNER TO synapse;
+
+--
+-- Name: un_partial_stated_room_stream_sequence; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.un_partial_stated_room_stream_sequence
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.un_partial_stated_room_stream_sequence OWNER TO synapse;
 
 --
 -- Name: user_daily_visits; Type: TABLE; Schema: public; Owner: synapse
@@ -1828,7 +2683,8 @@ ALTER TABLE public.transaction_id_to_pdu OWNER TO synapse;
 CREATE TABLE public.user_daily_visits (
     user_id text NOT NULL,
     device_id text,
-    "timestamp" bigint NOT NULL
+    "timestamp" bigint NOT NULL,
+    user_agent text
 );
 
 
@@ -1861,6 +2717,20 @@ CREATE TABLE public.user_directory_search (
 ALTER TABLE public.user_directory_search OWNER TO synapse;
 
 --
+-- Name: user_directory_stale_remote_users; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.user_directory_stale_remote_users (
+    user_id text NOT NULL,
+    user_server_name text NOT NULL,
+    next_try_at_ts bigint NOT NULL,
+    retry_counter integer NOT NULL
+);
+
+
+ALTER TABLE public.user_directory_stale_remote_users OWNER TO synapse;
+
+--
 -- Name: user_directory_stream_pos; Type: TABLE; Schema: public; Owner: synapse
 --
 
@@ -1874,17 +2744,46 @@ CREATE TABLE public.user_directory_stream_pos (
 ALTER TABLE public.user_directory_stream_pos OWNER TO synapse;
 
 --
+-- Name: user_external_ids; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.user_external_ids (
+    auth_provider text NOT NULL,
+    external_id text NOT NULL,
+    user_id text NOT NULL
+);
+
+
+ALTER TABLE public.user_external_ids OWNER TO synapse;
+
+--
 -- Name: user_filters; Type: TABLE; Schema: public; Owner: synapse
 --
 
 CREATE TABLE public.user_filters (
-    user_id text,
-    filter_id bigint,
-    filter_json bytea
+    user_id text NOT NULL,
+    filter_id bigint NOT NULL,
+    filter_json bytea NOT NULL,
+    full_user_id text,
+    CONSTRAINT full_user_id_not_null CHECK ((full_user_id IS NOT NULL))
 );
 
 
 ALTER TABLE public.user_filters OWNER TO synapse;
+
+--
+-- Name: user_id_seq; Type: SEQUENCE; Schema: public; Owner: synapse
+--
+
+CREATE SEQUENCE public.user_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.user_id_seq OWNER TO synapse;
 
 --
 -- Name: user_ips; Type: TABLE; Schema: public; Owner: synapse
@@ -1901,6 +2800,47 @@ CREATE TABLE public.user_ips (
 
 
 ALTER TABLE public.user_ips OWNER TO synapse;
+
+--
+-- Name: user_signature_stream; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.user_signature_stream (
+    stream_id bigint NOT NULL,
+    from_user_id text NOT NULL,
+    user_ids text NOT NULL,
+    instance_name text
+);
+
+
+ALTER TABLE public.user_signature_stream OWNER TO synapse;
+
+--
+-- Name: user_stats_current; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.user_stats_current (
+    user_id text NOT NULL,
+    joined_rooms bigint NOT NULL,
+    completed_delta_stream_id bigint NOT NULL
+);
+
+
+ALTER TABLE public.user_stats_current OWNER TO synapse;
+
+--
+-- Name: user_threepid_id_server; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.user_threepid_id_server (
+    user_id text NOT NULL,
+    medium text NOT NULL,
+    address text NOT NULL,
+    id_server text NOT NULL
+);
+
+
+ALTER TABLE public.user_threepid_id_server OWNER TO synapse;
 
 --
 -- Name: user_threepids; Type: TABLE; Schema: public; Owner: synapse
@@ -1930,7 +2870,14 @@ CREATE TABLE public.users (
     is_guest smallint DEFAULT 0 NOT NULL,
     appservice_id text,
     consent_version text,
-    consent_server_notice_sent text
+    consent_server_notice_sent text,
+    user_type text,
+    deactivated smallint DEFAULT 0 NOT NULL,
+    shadow_banned boolean,
+    consent_ts bigint,
+    approved boolean,
+    locked boolean DEFAULT false NOT NULL,
+    suspended boolean DEFAULT false NOT NULL
 );
 
 
@@ -1960,24 +2907,87 @@ CREATE TABLE public.users_pending_deactivation (
 ALTER TABLE public.users_pending_deactivation OWNER TO synapse;
 
 --
--- Name: users_who_share_rooms; Type: TABLE; Schema: public; Owner: synapse
+-- Name: users_to_send_full_presence_to; Type: TABLE; Schema: public; Owner: synapse
 --
 
-CREATE TABLE public.users_who_share_rooms (
+CREATE TABLE public.users_to_send_full_presence_to (
     user_id text NOT NULL,
-    other_user_id text NOT NULL,
-    room_id text NOT NULL,
-    share_private boolean NOT NULL
+    presence_stream_id bigint
 );
 
 
-ALTER TABLE public.users_who_share_rooms OWNER TO synapse;
+ALTER TABLE public.users_to_send_full_presence_to OWNER TO synapse;
+
+--
+-- Name: users_who_share_private_rooms; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.users_who_share_private_rooms (
+    user_id text NOT NULL,
+    other_user_id text NOT NULL,
+    room_id text NOT NULL
+);
+
+
+ALTER TABLE public.users_who_share_private_rooms OWNER TO synapse;
+
+--
+-- Name: worker_locks; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE TABLE public.worker_locks (
+    lock_name text NOT NULL,
+    lock_key text NOT NULL,
+    instance_name text NOT NULL,
+    token text NOT NULL,
+    last_renewed_ts bigint NOT NULL
+);
+
+
+ALTER TABLE public.worker_locks OWNER TO synapse;
+
+--
+-- Name: worker_read_write_locks; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE UNLOGGED TABLE public.worker_read_write_locks (
+    lock_name text NOT NULL,
+    lock_key text NOT NULL,
+    instance_name text NOT NULL,
+    write_lock boolean NOT NULL,
+    token text NOT NULL,
+    last_renewed_ts bigint NOT NULL
+);
+
+
+ALTER TABLE public.worker_read_write_locks OWNER TO synapse;
+
+--
+-- Name: worker_read_write_locks_mode; Type: TABLE; Schema: public; Owner: synapse
+--
+
+CREATE UNLOGGED TABLE public.worker_read_write_locks_mode (
+    lock_name text NOT NULL,
+    lock_key text NOT NULL,
+    write_lock boolean NOT NULL,
+    token text NOT NULL
+);
+
+
+ALTER TABLE public.worker_read_write_locks_mode OWNER TO synapse;
+
+--
+-- Name: instance_map instance_id; Type: DEFAULT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.instance_map ALTER COLUMN instance_id SET DEFAULT nextval('public.instance_map_instance_id_seq'::regclass);
+
 
 --
 -- Data for Name: access_tokens; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.access_tokens (id, user_id, device_id, token, last_used) FROM stdin;
+COPY public.access_tokens (id, user_id, device_id, token, valid_until_ms, puppets_user_id, last_validated, refresh_token_id, used) FROM stdin;
 \.
 
 
@@ -1985,41 +2995,15 @@ COPY public.access_tokens (id, user_id, device_id, token, last_used) FROM stdin;
 -- Data for Name: account_data; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.account_data (user_id, account_data_type, stream_id, content) FROM stdin;
+COPY public.account_data (user_id, account_data_type, stream_id, content, instance_name) FROM stdin;
 \.
 
 
 --
--- Data for Name: account_data_max_stream_id; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: account_validity; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.account_data_max_stream_id (lock, stream_id) FROM stdin;
-X	0
-X	0
-X	0
-X	0
-X	0
-X	0
-X	0
-X	0
-X	0
-X	0
-\.
-
-
---
--- Data for Name: application_services; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.application_services (id, url, token, hs_token, sender) FROM stdin;
-\.
-
-
---
--- Data for Name: application_services_regex; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.application_services_regex (id, as_id, namespace, regex) FROM stdin;
+COPY public.account_validity (user_id, expiration_ts_ms, email_sent, renewal_token, token_used_ts_ms) FROM stdin;
 \.
 
 
@@ -2027,7 +3011,7 @@ COPY public.application_services_regex (id, as_id, namespace, regex) FROM stdin;
 -- Data for Name: application_services_state; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.application_services_state (as_id, state, last_txn) FROM stdin;
+COPY public.application_services_state (as_id, state, read_receipt_stream_id, presence_stream_id, to_device_stream_id, device_list_stream_id) FROM stdin;
 \.
 
 
@@ -2052,131 +3036,88 @@ COPY public.applied_module_schemas (module_name, file) FROM stdin;
 --
 
 COPY public.applied_schema_deltas (version, file) FROM stdin;
-17	17/drop_indexes.sql
-17	17/server_keys.sql
-17	17/user_threepids.sql
-18	18/server_keys_bigger_ints.sql
-19	19/event_index.sql
-20	20/dummy.sql
-20	20/pushers.py
-21	21/end_to_end_keys.sql
-21	21/receipts.sql
-22	22/receipts_index.sql
-22	22/user_threepids_unique.sql
-23	23/drop_state_index.sql
-24	24/stats_reporting.sql
-25	25/00background_updates.sql
-25	25/fts.py
-25	25/guest_access.sql
-25	25/history_visibility.sql
-25	25/tags.sql
-26	26/account_data.sql
-27	27/account_data.sql
-27	27/forgotten_memberships.sql
-27	27/ts.py
-28	28/event_push_actions.sql
-28	28/events_room_stream.sql
-28	28/public_roms_index.sql
-28	28/receipts_user_id_index.sql
-28	28/upgrade_times.sql
-28	28/users_is_guest.sql
-29	29/push_actions.sql
-30	30/alias_creator.sql
-30	30/as_users.py
-30	30/deleted_pushers.sql
-30	30/presence_stream.sql
-30	30/public_rooms.sql
-30	30/push_rule_stream.sql
-30	30/state_stream.sql
-30	30/threepid_guest_access_tokens.sql
-31	31/invites.sql
-31	31/local_media_repository_url_cache.sql
-31	31/pushers.py
-31	31/pushers_index.sql
-31	31/search_update.py
-32	32/events.sql
-32	32/openid.sql
-32	32/pusher_throttle.sql
-32	32/remove_indices.sql
-32	32/reports.sql
-33	33/access_tokens_device_index.sql
-33	33/devices.sql
-33	33/devices_for_e2e_keys.sql
-33	33/devices_for_e2e_keys_clear_unknown_device.sql
-33	33/event_fields.py
-33	33/remote_media_ts.py
-33	33/user_ips_index.sql
-34	34/appservice_stream.sql
-34	34/cache_stream.py
-34	34/device_inbox.sql
-34	34/push_display_name_rename.sql
-34	34/received_txn_purge.py
-34	34/sent_txn_purge.py
-35	35/add_state_index.sql
-35	35/contains_url.sql
-35	35/device_outbox.sql
-35	35/device_stream_id.sql
-35	35/event_push_actions_index.sql
-35	35/public_room_list_change_stream.sql
-35	35/state.sql
-35	35/state_dedupe.sql
-35	35/stream_order_to_extrem.sql
-36	36/readd_public_rooms.sql
-37	37/remove_auth_idx.py
-37	37/user_threepids.sql
-38	38/postgres_fts_gist.sql
-39	39/appservice_room_list.sql
-39	39/device_federation_stream_idx.sql
-39	39/event_push_index.sql
-39	39/federation_out_position.sql
-39	39/membership_profile.sql
-40	40/current_state_idx.sql
-40	40/device_inbox.sql
-40	40/device_list_streams.sql
-40	40/event_push_summary.sql
-40	40/pushers.sql
-41	41/device_list_stream_idx.sql
-41	41/device_outbound_index.sql
-41	41/event_search_event_id_idx.sql
-41	41/ratelimit.sql
-42	42/current_state_delta.sql
-42	42/device_list_last_id.sql
-42	42/event_auth_state_only.sql
-42	42/user_dir.py
-43	43/blocked_rooms.sql
-43	43/quarantine_media.sql
-43	43/url_cache.sql
-43	43/user_share.sql
-44	44/expire_url_cache.sql
-45	45/group_server.sql
-45	45/profile_cache.sql
-46	46/drop_refresh_tokens.sql
-46	46/drop_unique_deleted_pushers.sql
-46	46/group_server.sql
-46	46/local_media_repository_url_idx.sql
-46	46/user_dir_null_room_ids.sql
-46	46/user_dir_typos.sql
-47	47/last_access_media.sql
-47	47/postgres_fts_gin.sql
-47	47/push_actions_staging.sql
-47	47/state_group_seq.py
-48	48/add_user_consent.sql
-48	48/add_user_ips_last_seen_index.sql
-48	48/deactivated_users.sql
-48	48/group_unique_indexes.py
-48	48/groups_joinable.sql
-49	49/add_user_consent_server_notice_sent.sql
-49	49/add_user_daily_visits.sql
-49	49/add_user_ips_last_seen_only_index.sql
-50	50/add_creation_ts_users_index.sql
-50	50/erasure_store.sql
-50	50/make_event_content_nullable.py
-51	51/e2e_room_keys.sql
-51	51/monthly_active_users.sql
-52	52/add_event_to_state_group_index.sql
-52	52/destination_health.sql
-52	52/device_list_streams_unique_idx.sql
-52	52/thread_id.sql
+73	73/01event_failed_pull_attempts.sql
+73	73/02add_pusher_enabled.sql
+73	73/02room_id_indexes_for_purging.sql
+73	73/03pusher_device_id.sql
+73	73/03users_approved_column.sql
+73	73/04partial_join_details.sql
+73	73/04pending_device_list_updates.sql
+73	73/05old_push_actions.sql.postgres
+73	73/06thread_notifications_thread_id_idx.sql
+73	73/08thread_receipts_non_null.sql.postgres
+73	73/09partial_joined_via_destination.sql
+73	73/09threads_table.sql
+73	73/10_update_sqlite_fts4_tokenizer.py
+73	73/10login_tokens.sql
+73	73/11event_search_room_id_n_distinct.sql.postgres
+73	73/12refactor_device_list_outbound_pokes.sql
+73	73/13add_device_lists_index.sql
+73	73/20_un_partial_stated_room_stream.sql
+73	73/21_un_partial_stated_room_stream_seq.sql.postgres
+73	73/22_rebuild_user_dir_stats.sql
+73	73/22_un_partial_stated_event_stream.sql
+73	73/23_fix_thread_index.sql
+73	73/23_un_partial_stated_room_stream_seq.sql.postgres
+73	73/24_events_jump_to_date_index.sql
+73	73/25drop_presence.sql
+74	74/01_user_directory_stale_remote_users.sql
+74	74/02_set_device_id_for_pushers_bg_update.sql
+74	74/03_membership_tables_event_stream_ordering.sql.postgres
+74	74/03_room_membership_index.sql
+74	74/04_delete_e2e_backup_keys_for_deactivated_users.sql
+74	74/04_membership_tables_event_stream_ordering_triggers.py
+74	74/05_events_txn_id_device_id.sql
+74	74/90COMMENTS_destinations.sql.postgres
+76	76/01_add_profiles_full_user_id_column.sql
+76	76/02_add_user_filters_full_user_id_column.sql
+76	76/03_per_user_experimental_features.sql
+76	76/04_add_room_forgetter.sql
+77	77/01_add_profiles_not_valid_check.sql.postgres
+77	77/02_add_user_filters_not_valid_check.sql.postgres
+77	77/03bg_populate_full_user_id_profiles.sql
+77	77/04bg_populate_full_user_id_user_filters.sql
+77	77/05thread_notifications_backfill.sql
+77	77/06thread_notifications_not_null_event_push_actions.sql.postgres
+77	77/06thread_notifications_not_null_event_push_actions_staging.sql.postgres
+77	77/06thread_notifications_not_null_event_push_summary.sql.postgres
+77	77/14bg_indices_event_stream_ordering.sql
+78	78/01_validate_and_update_profiles.py
+78	78/02_validate_and_update_user_filters.py
+78	78/03_remove_unused_indexes_user_filters.py
+78	78/03event_extremities_constraints.py
+78	78/04_add_full_user_id_index_user_filters.py
+79	79/03_read_write_locks_triggers.sql.postgres
+79	79/04_mitigate_stream_ordering_update_race.py
+79	79/05_read_write_locks_triggers.sql.postgres
+80	80/01_users_alter_locked.sql
+80	80/02_read_write_locks_unlogged.sql.postgres
+80	80/02_scheduled_tasks.sql
+80	80/03_read_write_locks_triggers.sql.postgres
+80	80/04_read_write_locks_deadlock.sql.postgres
+82	82/02_scheduled_tasks_index.sql
+82	82/04_add_indices_for_purging_rooms.sql
+82	82/05gaps.sql
+83	83/01_drop_old_tables.sql
+83	83/05_cross_signing_key_update_grant.sql
+83	83/06_event_push_summary_room.sql
+84	84/01_auth_links_stats.sql.postgres
+84	84/02_auth_links_index.sql
+84	84/03_auth_links_analyze.sql.postgres
+84	84/04_access_token_index.sql
+85	85/01_add_suspended.sql
+85	85/02_add_instance_names.sql
+85	85/03_new_sequences.sql.postgres
+85	85/04_cleanup_device_federation_outbox.sql
+85	85/05_add_instance_names_converted_pos.sql
+85	85/06_add_room_reports.sql
+86	86/01_authenticate_media.sql
+86	86/02_receipts_event_id_index.sql
+87	87/01_sliding_sync_memberships.sql
+87	87/02_per_connection_state.sql
+87	87/03_current_state_index.sql
+88	88/01_add_delayed_events.sql
+88	88/02_fix_sliding_sync_membership_snapshots_forgotten_column.sql
 \.
 
 
@@ -2201,7 +3142,7 @@ X	0
 -- Data for Name: background_updates; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.background_updates (update_name, progress_json, depends_on) FROM stdin;
+COPY public.background_updates (update_name, progress_json, depends_on, ordering) FROM stdin;
 \.
 
 
@@ -2214,10 +3155,10 @@ COPY public.blocked_rooms (room_id, user_id) FROM stdin;
 
 
 --
--- Data for Name: cache_invalidation_stream; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: cache_invalidation_stream_by_instance; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.cache_invalidation_stream (stream_id, cache_func, keys, invalidation_ts) FROM stdin;
+COPY public.cache_invalidation_stream_by_instance (stream_id, instance_name, cache_func, keys, invalidation_ts) FROM stdin;
 \.
 
 
@@ -2225,7 +3166,7 @@ COPY public.cache_invalidation_stream (stream_id, cache_func, keys, invalidation
 -- Data for Name: current_state_delta_stream; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.current_state_delta_stream (stream_id, room_id, type, state_key, event_id, prev_event_id) FROM stdin;
+COPY public.current_state_delta_stream (stream_id, room_id, type, state_key, event_id, prev_event_id, instance_name) FROM stdin;
 \.
 
 
@@ -2233,15 +3174,32 @@ COPY public.current_state_delta_stream (stream_id, room_id, type, state_key, eve
 -- Data for Name: current_state_events; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.current_state_events (event_id, room_id, type, state_key) FROM stdin;
+COPY public.current_state_events (event_id, room_id, type, state_key, membership, event_stream_ordering) FROM stdin;
 \.
 
 
 --
--- Data for Name: current_state_resets; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: dehydrated_devices; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.current_state_resets (event_stream_ordering) FROM stdin;
+COPY public.dehydrated_devices (user_id, device_id, device_data) FROM stdin;
+\.
+
+
+--
+-- Data for Name: delayed_events; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.delayed_events (delay_id, user_localpart, device_id, delay, send_ts, room_id, event_type, state_key, origin_server_ts, content, is_processed) FROM stdin;
+\.
+
+
+--
+-- Data for Name: delayed_events_stream_pos; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.delayed_events_stream_pos (lock, stream_id) FROM stdin;
+X	1
 \.
 
 
@@ -2249,7 +3207,7 @@ COPY public.current_state_resets (event_stream_ordering) FROM stdin;
 -- Data for Name: deleted_pushers; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.deleted_pushers (stream_id, app_id, pushkey, user_id) FROM stdin;
+COPY public.deleted_pushers (stream_id, app_id, pushkey, user_id, instance_name) FROM stdin;
 \.
 
 
@@ -2262,10 +3220,26 @@ COPY public.destination_health (destination, cost) FROM stdin;
 
 
 --
+-- Data for Name: destination_rooms; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.destination_rooms (destination, room_id, stream_ordering) FROM stdin;
+\.
+
+
+--
 -- Data for Name: destinations; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.destinations (destination, retry_last_ts, retry_interval) FROM stdin;
+COPY public.destinations (destination, retry_last_ts, retry_interval, failure_ts, last_successful_stream_ordering) FROM stdin;
+\.
+
+
+--
+-- Data for Name: device_auth_providers; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.device_auth_providers (user_id, device_id, auth_provider_id, auth_provider_session_id) FROM stdin;
 \.
 
 
@@ -2273,7 +3247,7 @@ COPY public.destinations (destination, retry_last_ts, retry_interval) FROM stdin
 -- Data for Name: device_federation_inbox; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.device_federation_inbox (origin, message_id, received_ts) FROM stdin;
+COPY public.device_federation_inbox (origin, message_id, received_ts, instance_name) FROM stdin;
 \.
 
 
@@ -2281,7 +3255,7 @@ COPY public.device_federation_inbox (origin, message_id, received_ts) FROM stdin
 -- Data for Name: device_federation_outbox; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.device_federation_outbox (destination, stream_id, queued_ts, messages_json) FROM stdin;
+COPY public.device_federation_outbox (destination, stream_id, queued_ts, messages_json, instance_name) FROM stdin;
 \.
 
 
@@ -2289,7 +3263,24 @@ COPY public.device_federation_outbox (destination, stream_id, queued_ts, message
 -- Data for Name: device_inbox; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.device_inbox (user_id, device_id, stream_id, message_json) FROM stdin;
+COPY public.device_inbox (user_id, device_id, stream_id, message_json, instance_name) FROM stdin;
+\.
+
+
+--
+-- Data for Name: device_lists_changes_converted_stream_position; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.device_lists_changes_converted_stream_position (lock, stream_id, room_id, instance_name) FROM stdin;
+X	1		\N
+\.
+
+
+--
+-- Data for Name: device_lists_changes_in_room; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.device_lists_changes_in_room (user_id, device_id, room_id, stream_id, converted_to_destinations, opentracing_context, instance_name) FROM stdin;
 \.
 
 
@@ -2305,7 +3296,7 @@ COPY public.device_lists_outbound_last_success (destination, user_id, stream_id)
 -- Data for Name: device_lists_outbound_pokes; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.device_lists_outbound_pokes (destination, stream_id, user_id, device_id, sent, ts) FROM stdin;
+COPY public.device_lists_outbound_pokes (destination, stream_id, user_id, device_id, sent, ts, opentracing_context, instance_name) FROM stdin;
 \.
 
 
@@ -2326,19 +3317,26 @@ COPY public.device_lists_remote_extremeties (user_id, stream_id) FROM stdin;
 
 
 --
--- Data for Name: device_lists_stream; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: device_lists_remote_pending; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.device_lists_stream (stream_id, user_id, device_id) FROM stdin;
+COPY public.device_lists_remote_pending (stream_id, user_id, device_id, instance_name) FROM stdin;
 \.
 
 
 --
--- Data for Name: device_max_stream_id; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: device_lists_remote_resync; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.device_max_stream_id (stream_id) FROM stdin;
-0
+COPY public.device_lists_remote_resync (user_id, added_ts) FROM stdin;
+\.
+
+
+--
+-- Data for Name: device_lists_stream; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.device_lists_stream (stream_id, user_id, device_id, instance_name) FROM stdin;
 \.
 
 
@@ -2346,7 +3344,23 @@ COPY public.device_max_stream_id (stream_id) FROM stdin;
 -- Data for Name: devices; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.devices (user_id, device_id, display_name) FROM stdin;
+COPY public.devices (user_id, device_id, display_name, last_seen, ip, user_agent, hidden) FROM stdin;
+\.
+
+
+--
+-- Data for Name: e2e_cross_signing_keys; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.e2e_cross_signing_keys (user_id, keytype, keydata, stream_id, updatable_without_uia_before_ms, instance_name) FROM stdin;
+\.
+
+
+--
+-- Data for Name: e2e_cross_signing_signatures; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.e2e_cross_signing_signatures (user_id, key_id, target_user_id, target_device_id, signature) FROM stdin;
 \.
 
 
@@ -2355,6 +3369,14 @@ COPY public.devices (user_id, device_id, display_name) FROM stdin;
 --
 
 COPY public.e2e_device_keys_json (user_id, device_id, ts_added_ms, key_json) FROM stdin;
+\.
+
+
+--
+-- Data for Name: e2e_fallback_keys_json; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.e2e_fallback_keys_json (user_id, device_id, algorithm, key_id, key_json, used) FROM stdin;
 \.
 
 
@@ -2378,7 +3400,7 @@ COPY public.e2e_room_keys (user_id, room_id, session_id, version, first_message_
 -- Data for Name: e2e_room_keys_versions; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.e2e_room_keys_versions (user_id, version, algorithm, auth_data, deleted) FROM stdin;
+COPY public.e2e_room_keys_versions (user_id, version, algorithm, auth_data, deleted, etag) FROM stdin;
 \.
 
 
@@ -2399,6 +3421,30 @@ COPY public.event_auth (event_id, auth_id, room_id) FROM stdin;
 
 
 --
+-- Data for Name: event_auth_chain_links; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.event_auth_chain_links (origin_chain_id, origin_sequence_number, target_chain_id, target_sequence_number) FROM stdin;
+\.
+
+
+--
+-- Data for Name: event_auth_chain_to_calculate; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.event_auth_chain_to_calculate (event_id, room_id, type, state_key) FROM stdin;
+\.
+
+
+--
+-- Data for Name: event_auth_chains; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.event_auth_chains (event_id, chain_id, sequence_number) FROM stdin;
+\.
+
+
+--
 -- Data for Name: event_backward_extremities; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
@@ -2407,34 +3453,26 @@ COPY public.event_backward_extremities (event_id, room_id) FROM stdin;
 
 
 --
--- Data for Name: event_content_hashes; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.event_content_hashes (event_id, algorithm, hash) FROM stdin;
-\.
-
-
---
--- Data for Name: event_destinations; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.event_destinations (event_id, destination, delivered_ts) FROM stdin;
-\.
-
-
---
--- Data for Name: event_edge_hashes; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.event_edge_hashes (event_id, prev_event_id, algorithm, hash) FROM stdin;
-\.
-
-
---
 -- Data for Name: event_edges; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
 COPY public.event_edges (event_id, prev_event_id, room_id, is_state) FROM stdin;
+\.
+
+
+--
+-- Data for Name: event_expiry; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.event_expiry (event_id, expiry_ts) FROM stdin;
+\.
+
+
+--
+-- Data for Name: event_failed_pull_attempts; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.event_failed_pull_attempts (room_id, event_id, num_attempts, last_attempt_ts, last_cause) FROM stdin;
 \.
 
 
@@ -2450,7 +3488,15 @@ COPY public.event_forward_extremities (event_id, room_id) FROM stdin;
 -- Data for Name: event_json; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.event_json (event_id, room_id, internal_metadata, json) FROM stdin;
+COPY public.event_json (event_id, room_id, internal_metadata, json, format_version) FROM stdin;
+\.
+
+
+--
+-- Data for Name: event_labels; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.event_labels (event_id, label, room_id, topological_ordering) FROM stdin;
 \.
 
 
@@ -2458,7 +3504,7 @@ COPY public.event_json (event_id, room_id, internal_metadata, json) FROM stdin;
 -- Data for Name: event_push_actions; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.event_push_actions (room_id, event_id, user_id, profile_tag, actions, topological_ordering, stream_ordering, notif, highlight) FROM stdin;
+COPY public.event_push_actions (room_id, event_id, user_id, profile_tag, actions, topological_ordering, stream_ordering, notif, highlight, unread, thread_id) FROM stdin;
 \.
 
 
@@ -2466,7 +3512,7 @@ COPY public.event_push_actions (room_id, event_id, user_id, profile_tag, actions
 -- Data for Name: event_push_actions_staging; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.event_push_actions_staging (event_id, user_id, actions, notif, highlight) FROM stdin;
+COPY public.event_push_actions_staging (event_id, user_id, actions, notif, highlight, unread, thread_id, inserted_ts) FROM stdin;
 \.
 
 
@@ -2474,7 +3520,16 @@ COPY public.event_push_actions_staging (event_id, user_id, actions, notif, highl
 -- Data for Name: event_push_summary; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.event_push_summary (user_id, room_id, notif_count, stream_ordering) FROM stdin;
+COPY public.event_push_summary (user_id, room_id, notif_count, stream_ordering, unread_count, last_receipt_stream_ordering, thread_id) FROM stdin;
+\.
+
+
+--
+-- Data for Name: event_push_summary_last_receipt_stream_id; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.event_push_summary_last_receipt_stream_id (lock, stream_id) FROM stdin;
+X	1
 \.
 
 
@@ -2483,15 +3538,15 @@ COPY public.event_push_summary (user_id, room_id, notif_count, stream_ordering) 
 --
 
 COPY public.event_push_summary_stream_ordering (lock, stream_ordering) FROM stdin;
-X	0
+X	1
 \.
 
 
 --
--- Data for Name: event_reference_hashes; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: event_relations; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.event_reference_hashes (event_id, algorithm, hash) FROM stdin;
+COPY public.event_relations (event_id, relates_to_id, relation_type, aggregation_key) FROM stdin;
 \.
 
 
@@ -2512,14 +3567,6 @@ COPY public.event_search (event_id, room_id, sender, key, vector, origin_server_
 
 
 --
--- Data for Name: event_signatures; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.event_signatures (event_id, signature_name, key_id, signature) FROM stdin;
-\.
-
-
---
 -- Data for Name: event_to_state_groups; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
@@ -2528,10 +3575,18 @@ COPY public.event_to_state_groups (event_id, state_group) FROM stdin;
 
 
 --
+-- Data for Name: event_txn_id_device_id; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.event_txn_id_device_id (event_id, room_id, user_id, device_id, txn_id, inserted_ts) FROM stdin;
+\.
+
+
+--
 -- Data for Name: events; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.events (stream_ordering, topological_ordering, event_id, type, room_id, content, unrecognized_keys, processed, outlier, depth, origin_server_ts, received_ts, sender, contains_url, thread_id) FROM stdin;
+COPY public.events (topological_ordering, event_id, type, room_id, content, unrecognized_keys, processed, outlier, depth, origin_server_ts, received_ts, sender, contains_url, instance_name, stream_ordering, state_key, rejection_reason) FROM stdin;
 \.
 
 
@@ -2539,7 +3594,15 @@ COPY public.events (stream_ordering, topological_ordering, event_id, type, room_
 -- Data for Name: ex_outlier_stream; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.ex_outlier_stream (event_stream_ordering, event_id, state_group) FROM stdin;
+COPY public.ex_outlier_stream (event_stream_ordering, event_id, state_group, instance_name) FROM stdin;
+\.
+
+
+--
+-- Data for Name: federation_inbound_events_staging; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.federation_inbound_events_staging (origin, room_id, event_id, received_ts, event_json, internal_metadata) FROM stdin;
 \.
 
 
@@ -2547,153 +3610,33 @@ COPY public.ex_outlier_stream (event_stream_ordering, event_id, state_group) FRO
 -- Data for Name: federation_stream_position; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.federation_stream_position (type, stream_id) FROM stdin;
-federation	-1
-events	-1
+COPY public.federation_stream_position (type, stream_id, instance_name) FROM stdin;
+federation	-1	master
+events	-1	master
 \.
 
 
 --
--- Data for Name: feedback; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: ignored_users; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.feedback (event_id, feedback_type, target_event_id, sender, room_id) FROM stdin;
+COPY public.ignored_users (ignorer_user_id, ignored_user_id) FROM stdin;
 \.
 
 
 --
--- Data for Name: group_attestations_remote; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: instance_map; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.group_attestations_remote (group_id, user_id, valid_until_ms, attestation_json) FROM stdin;
+COPY public.instance_map (instance_id, instance_name) FROM stdin;
 \.
 
 
 --
--- Data for Name: group_attestations_renewals; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: local_current_membership; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.group_attestations_renewals (group_id, user_id, valid_until_ms) FROM stdin;
-\.
-
-
---
--- Data for Name: group_invites; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.group_invites (group_id, user_id) FROM stdin;
-\.
-
-
---
--- Data for Name: group_roles; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.group_roles (group_id, role_id, profile, is_public) FROM stdin;
-\.
-
-
---
--- Data for Name: group_room_categories; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.group_room_categories (group_id, category_id, profile, is_public) FROM stdin;
-\.
-
-
---
--- Data for Name: group_rooms; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.group_rooms (group_id, room_id, is_public) FROM stdin;
-\.
-
-
---
--- Data for Name: group_summary_roles; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.group_summary_roles (group_id, role_id, role_order) FROM stdin;
-\.
-
-
---
--- Data for Name: group_summary_room_categories; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.group_summary_room_categories (group_id, category_id, cat_order) FROM stdin;
-\.
-
-
---
--- Data for Name: group_summary_rooms; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.group_summary_rooms (group_id, room_id, category_id, room_order, is_public) FROM stdin;
-\.
-
-
---
--- Data for Name: group_summary_users; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.group_summary_users (group_id, user_id, role_id, user_order, is_public) FROM stdin;
-\.
-
-
---
--- Data for Name: group_users; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.group_users (group_id, user_id, is_admin, is_public) FROM stdin;
-\.
-
-
---
--- Data for Name: groups; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.groups (group_id, name, avatar_url, short_description, long_description, is_public, join_policy) FROM stdin;
-\.
-
-
---
--- Data for Name: guest_access; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.guest_access (event_id, room_id, guest_access) FROM stdin;
-\.
-
-
---
--- Data for Name: history_visibility; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.history_visibility (event_id, room_id, history_visibility) FROM stdin;
-\.
-
-
---
--- Data for Name: local_group_membership; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.local_group_membership (group_id, user_id, is_admin, membership, is_publicised, content) FROM stdin;
-\.
-
-
---
--- Data for Name: local_group_updates; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.local_group_updates (stream_id, group_id, user_id, type, content) FROM stdin;
-\.
-
-
---
--- Data for Name: local_invites; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.local_invites (stream_id, inviter, invitee, event_id, room_id, locally_rejected, replaced_by) FROM stdin;
+COPY public.local_current_membership (room_id, user_id, event_id, membership, event_stream_ordering) FROM stdin;
 \.
 
 
@@ -2701,7 +3644,7 @@ COPY public.local_invites (stream_id, inviter, invitee, event_id, room_id, local
 -- Data for Name: local_media_repository; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.local_media_repository (media_id, media_type, media_length, created_ts, upload_name, user_id, quarantined_by, url_cache, last_access_ts) FROM stdin;
+COPY public.local_media_repository (media_id, media_type, media_length, created_ts, upload_name, user_id, quarantined_by, url_cache, last_access_ts, safe_from_quarantine, authenticated) FROM stdin;
 \.
 
 
@@ -2722,6 +3665,14 @@ COPY public.local_media_repository_url_cache (url, response_code, etag, expires_
 
 
 --
+-- Data for Name: login_tokens; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.login_tokens (token, user_id, expiry_ts, used_ts, auth_provider_id, auth_provider_session_id) FROM stdin;
+\.
+
+
+--
 -- Data for Name: monthly_active_users; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
@@ -2738,26 +3689,34 @@ COPY public.open_id_tokens (token, ts_valid_until_ms, user_id) FROM stdin;
 
 
 --
--- Data for Name: presence; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: partial_state_events; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.presence (user_id, state, status_msg, mtime) FROM stdin;
+COPY public.partial_state_events (room_id, event_id) FROM stdin;
 \.
 
 
 --
--- Data for Name: presence_allow_inbound; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: partial_state_rooms; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.presence_allow_inbound (observed_user_id, observer_user_id) FROM stdin;
+COPY public.partial_state_rooms (room_id, device_lists_stream_id, join_event_id, joined_via) FROM stdin;
 \.
 
 
 --
--- Data for Name: presence_list; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: partial_state_rooms_servers; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.presence_list (user_id, observed_user_id, accepted) FROM stdin;
+COPY public.partial_state_rooms_servers (room_id, server_name) FROM stdin;
+\.
+
+
+--
+-- Data for Name: per_user_experimental_features; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.per_user_experimental_features (user_id, feature, enabled) FROM stdin;
 \.
 
 
@@ -2765,7 +3724,7 @@ COPY public.presence_list (user_id, observed_user_id, accepted) FROM stdin;
 -- Data for Name: presence_stream; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.presence_stream (stream_id, user_id, state, last_active_ts, last_federation_update_ts, last_user_sync_ts, status_msg, currently_active) FROM stdin;
+COPY public.presence_stream (stream_id, user_id, state, last_active_ts, last_federation_update_ts, last_user_sync_ts, status_msg, currently_active, instance_name) FROM stdin;
 \.
 
 
@@ -2773,15 +3732,7 @@ COPY public.presence_stream (stream_id, user_id, state, last_active_ts, last_fed
 -- Data for Name: profiles; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.profiles (user_id, displayname, avatar_url) FROM stdin;
-\.
-
-
---
--- Data for Name: public_room_list_stream; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.public_room_list_stream (stream_id, room_id, visibility, appservice_id, network_id) FROM stdin;
+COPY public.profiles (user_id, displayname, avatar_url, full_user_id) FROM stdin;
 \.
 
 
@@ -2805,7 +3756,7 @@ COPY public.push_rules_enable (id, user_name, rule_id, enabled) FROM stdin;
 -- Data for Name: push_rules_stream; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.push_rules_stream (stream_id, event_stream_ordering, user_id, rule_id, op, priority_class, priority, conditions, actions) FROM stdin;
+COPY public.push_rules_stream (stream_id, event_stream_ordering, user_id, rule_id, op, priority_class, priority, conditions, actions, instance_name) FROM stdin;
 \.
 
 
@@ -2821,7 +3772,7 @@ COPY public.pusher_throttle (pusher, room_id, last_sent_ts, throttle_ms) FROM st
 -- Data for Name: pushers; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.pushers (id, user_name, access_token, profile_tag, kind, app_id, app_display_name, device_display_name, pushkey, ts, lang, data, last_stream_ordering, last_success, failing_since) FROM stdin;
+COPY public.pushers (id, user_name, access_token, profile_tag, kind, app_id, app_display_name, device_display_name, pushkey, ts, lang, data, last_stream_ordering, last_success, failing_since, enabled, device_id, instance_name) FROM stdin;
 \.
 
 
@@ -2837,7 +3788,7 @@ COPY public.ratelimit_override (user_id, messages_per_second, burst_count) FROM 
 -- Data for Name: receipts_graph; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.receipts_graph (room_id, receipt_type, user_id, event_ids, data) FROM stdin;
+COPY public.receipts_graph (room_id, receipt_type, user_id, event_ids, data, thread_id) FROM stdin;
 \.
 
 
@@ -2845,7 +3796,7 @@ COPY public.receipts_graph (room_id, receipt_type, user_id, event_ids, data) FRO
 -- Data for Name: receipts_linearized; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.receipts_linearized (stream_id, room_id, receipt_type, user_id, event_id, data) FROM stdin;
+COPY public.receipts_linearized (stream_id, room_id, receipt_type, user_id, event_id, data, instance_name, event_stream_ordering, thread_id) FROM stdin;
 \.
 
 
@@ -2861,7 +3812,23 @@ COPY public.received_transactions (transaction_id, origin, ts, response_code, re
 -- Data for Name: redactions; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.redactions (event_id, redacts) FROM stdin;
+COPY public.redactions (event_id, redacts, have_censored, received_ts) FROM stdin;
+\.
+
+
+--
+-- Data for Name: refresh_tokens; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.refresh_tokens (id, user_id, device_id, token, next_token_id, expiry_ts, ultimate_session_expiry_ts) FROM stdin;
+\.
+
+
+--
+-- Data for Name: registration_tokens; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.registration_tokens (token, uses_allowed, pending, completed, expiry_time) FROM stdin;
 \.
 
 
@@ -2877,7 +3844,7 @@ COPY public.rejections (event_id, reason, last_check) FROM stdin;
 -- Data for Name: remote_media_cache; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.remote_media_cache (media_origin, media_id, media_type, created_ts, upload_name, media_length, filesystem_id, last_access_ts, quarantined_by) FROM stdin;
+COPY public.remote_media_cache (media_origin, media_id, media_type, created_ts, upload_name, media_length, filesystem_id, last_access_ts, quarantined_by, authenticated) FROM stdin;
 \.
 
 
@@ -2890,18 +3857,10 @@ COPY public.remote_media_cache_thumbnails (media_origin, media_id, thumbnail_wid
 
 
 --
--- Data for Name: remote_profile_cache; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.remote_profile_cache (user_id, displayname, avatar_url, last_check) FROM stdin;
-\.
-
-
---
 -- Data for Name: room_account_data; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.room_account_data (user_id, room_id, account_data_type, stream_id, content) FROM stdin;
+COPY public.room_account_data (user_id, room_id, account_data_type, stream_id, content, instance_name) FROM stdin;
 \.
 
 
@@ -2930,10 +3889,11 @@ COPY public.room_depth (room_id, min_depth) FROM stdin;
 
 
 --
--- Data for Name: room_hosts; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: room_forgetter_stream_pos; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.room_hosts (room_id, host) FROM stdin;
+COPY public.room_forgetter_stream_pos (lock, stream_id) FROM stdin;
+X	1
 \.
 
 
@@ -2941,15 +3901,47 @@ COPY public.room_hosts (room_id, host) FROM stdin;
 -- Data for Name: room_memberships; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.room_memberships (event_id, user_id, sender, room_id, membership, forgotten, display_name, avatar_url) FROM stdin;
+COPY public.room_memberships (event_id, user_id, sender, room_id, membership, forgotten, display_name, avatar_url, event_stream_ordering) FROM stdin;
 \.
 
 
 --
--- Data for Name: room_names; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: room_reports; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.room_names (event_id, room_id, name) FROM stdin;
+COPY public.room_reports (id, received_ts, room_id, user_id, reason) FROM stdin;
+\.
+
+
+--
+-- Data for Name: room_retention; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.room_retention (room_id, event_id, min_lifetime, max_lifetime) FROM stdin;
+\.
+
+
+--
+-- Data for Name: room_stats_current; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.room_stats_current (room_id, current_state_events, joined_members, invited_members, left_members, banned_members, local_users_in_room, completed_delta_stream_id, knocked_members) FROM stdin;
+\.
+
+
+--
+-- Data for Name: room_stats_earliest_token; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.room_stats_earliest_token (room_id, token) FROM stdin;
+\.
+
+
+--
+-- Data for Name: room_stats_state; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.room_stats_state (room_id, name, canonical_alias, join_rules, history_visibility, encryption, avatar, guest_access, is_federatable, topic, room_type) FROM stdin;
 \.
 
 
@@ -2965,7 +3957,7 @@ COPY public.room_tags (user_id, room_id, tag, content) FROM stdin;
 -- Data for Name: room_tags_revisions; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.room_tags_revisions (user_id, room_id, stream_id) FROM stdin;
+COPY public.room_tags_revisions (user_id, room_id, stream_id, instance_name) FROM stdin;
 \.
 
 
@@ -2973,7 +3965,24 @@ COPY public.room_tags_revisions (user_id, room_id, stream_id) FROM stdin;
 -- Data for Name: rooms; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.rooms (room_id, is_public, creator) FROM stdin;
+COPY public.rooms (room_id, is_public, creator, room_version, has_auth_chain_index) FROM stdin;
+\.
+
+
+--
+-- Data for Name: scheduled_tasks; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.scheduled_tasks (id, action, status, "timestamp", resource_id, params, result, error) FROM stdin;
+\.
+
+
+--
+-- Data for Name: schema_compat_version; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.schema_compat_version (lock, compat_version) FROM stdin;
+X	84
 \.
 
 
@@ -2982,15 +3991,7 @@ COPY public.rooms (room_id, is_public, creator) FROM stdin;
 --
 
 COPY public.schema_version (lock, version, upgraded) FROM stdin;
-X	52	t
-\.
-
-
---
--- Data for Name: sent_transactions; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.sent_transactions (id, transaction_id, destination, response_code, response_json, ts) FROM stdin;
+X	88	t
 \.
 
 
@@ -3006,15 +4007,79 @@ COPY public.server_keys_json (server_name, key_id, from_server, ts_added_ms, ts_
 -- Data for Name: server_signature_keys; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.server_signature_keys (server_name, key_id, from_server, ts_added_ms, verify_key) FROM stdin;
+COPY public.server_signature_keys (server_name, key_id, from_server, ts_added_ms, verify_key, ts_valid_until_ms) FROM stdin;
 \.
 
 
 --
--- Data for Name: server_tls_certificates; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: sessions; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.server_tls_certificates (server_name, fingerprint, from_server, ts_added_ms, tls_certificate) FROM stdin;
+COPY public.sessions (session_type, session_id, value, expiry_time_ms) FROM stdin;
+\.
+
+
+--
+-- Data for Name: sliding_sync_connection_positions; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.sliding_sync_connection_positions (connection_position, connection_key, created_ts) FROM stdin;
+\.
+
+
+--
+-- Data for Name: sliding_sync_connection_required_state; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.sliding_sync_connection_required_state (required_state_id, connection_key, required_state) FROM stdin;
+\.
+
+
+--
+-- Data for Name: sliding_sync_connection_room_configs; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.sliding_sync_connection_room_configs (connection_position, room_id, timeline_limit, required_state_id) FROM stdin;
+\.
+
+
+--
+-- Data for Name: sliding_sync_connection_streams; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.sliding_sync_connection_streams (connection_position, stream, room_id, room_status, last_token) FROM stdin;
+\.
+
+
+--
+-- Data for Name: sliding_sync_connections; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.sliding_sync_connections (connection_key, user_id, effective_device_id, conn_id, created_ts) FROM stdin;
+\.
+
+
+--
+-- Data for Name: sliding_sync_joined_rooms; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.sliding_sync_joined_rooms (room_id, event_stream_ordering, bump_stamp, room_type, room_name, is_encrypted, tombstone_successor_room_id) FROM stdin;
+\.
+
+
+--
+-- Data for Name: sliding_sync_joined_rooms_to_recalculate; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.sliding_sync_joined_rooms_to_recalculate (room_id) FROM stdin;
+\.
+
+
+--
+-- Data for Name: sliding_sync_membership_snapshots; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.sliding_sync_membership_snapshots (room_id, user_id, sender, membership_event_id, membership, forgotten, event_stream_ordering, event_instance_name, has_known_state, room_type, room_name, is_encrypted, tombstone_successor_room_id) FROM stdin;
 \.
 
 
@@ -3027,26 +4092,11 @@ COPY public.state_events (event_id, room_id, type, state_key, prev_state) FROM s
 
 
 --
--- Data for Name: state_forward_extremities; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.state_forward_extremities (event_id, room_id, type, state_key) FROM stdin;
-\.
-
-
---
 -- Data for Name: state_group_edges; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
 COPY public.state_group_edges (state_group, prev_state_group) FROM stdin;
 \.
-
-
---
--- Name: state_group_id_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
---
-
-SELECT pg_catalog.setval('public.state_group_id_seq', 1, false);
 
 
 --
@@ -3066,10 +4116,11 @@ COPY public.state_groups_state (state_group, room_id, type, state_key, event_id)
 
 
 --
--- Data for Name: stats_reporting; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: stats_incremental_position; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.stats_reporting (reported_stream_token, reported_time) FROM stdin;
+COPY public.stats_incremental_position (lock, stream_id) FROM stdin;
+X	1
 \.
 
 
@@ -3082,6 +4133,22 @@ COPY public.stream_ordering_to_exterm (stream_ordering, room_id, event_id) FROM 
 
 
 --
+-- Data for Name: stream_positions; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.stream_positions (stream_name, instance_name, stream_id) FROM stdin;
+\.
+
+
+--
+-- Data for Name: threads; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.threads (room_id, thread_id, latest_event_id, topological_ordering, stream_ordering) FROM stdin;
+\.
+
+
+--
 -- Data for Name: threepid_guest_access_tokens; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
@@ -3090,18 +4157,66 @@ COPY public.threepid_guest_access_tokens (medium, address, guest_access_token, f
 
 
 --
--- Data for Name: topics; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: threepid_validation_session; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.topics (event_id, room_id, topic) FROM stdin;
+COPY public.threepid_validation_session (session_id, medium, address, client_secret, last_send_attempt, validated_at) FROM stdin;
 \.
 
 
 --
--- Data for Name: transaction_id_to_pdu; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: threepid_validation_token; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.transaction_id_to_pdu (transaction_id, destination, pdu_id, pdu_origin) FROM stdin;
+COPY public.threepid_validation_token (token, session_id, next_link, expires) FROM stdin;
+\.
+
+
+--
+-- Data for Name: timeline_gaps; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.timeline_gaps (room_id, instance_name, stream_ordering) FROM stdin;
+\.
+
+
+--
+-- Data for Name: ui_auth_sessions; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.ui_auth_sessions (session_id, creation_time, serverdict, clientdict, uri, method, description) FROM stdin;
+\.
+
+
+--
+-- Data for Name: ui_auth_sessions_credentials; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.ui_auth_sessions_credentials (session_id, stage_type, result) FROM stdin;
+\.
+
+
+--
+-- Data for Name: ui_auth_sessions_ips; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.ui_auth_sessions_ips (session_id, ip, user_agent) FROM stdin;
+\.
+
+
+--
+-- Data for Name: un_partial_stated_event_stream; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.un_partial_stated_event_stream (stream_id, instance_name, event_id, rejection_status_changed) FROM stdin;
+\.
+
+
+--
+-- Data for Name: un_partial_stated_room_stream; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.un_partial_stated_room_stream (stream_id, instance_name, room_id) FROM stdin;
 \.
 
 
@@ -3109,7 +4224,7 @@ COPY public.transaction_id_to_pdu (transaction_id, destination, pdu_id, pdu_orig
 -- Data for Name: user_daily_visits; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.user_daily_visits (user_id, device_id, "timestamp") FROM stdin;
+COPY public.user_daily_visits (user_id, device_id, "timestamp", user_agent) FROM stdin;
 \.
 
 
@@ -3130,6 +4245,14 @@ COPY public.user_directory_search (user_id, vector) FROM stdin;
 
 
 --
+-- Data for Name: user_directory_stale_remote_users; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.user_directory_stale_remote_users (user_id, user_server_name, next_try_at_ts, retry_counter) FROM stdin;
+\.
+
+
+--
 -- Data for Name: user_directory_stream_pos; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
@@ -3139,10 +4262,18 @@ X	-1
 
 
 --
+-- Data for Name: user_external_ids; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.user_external_ids (auth_provider, external_id, user_id) FROM stdin;
+\.
+
+
+--
 -- Data for Name: user_filters; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.user_filters (user_id, filter_id, filter_json) FROM stdin;
+COPY public.user_filters (user_id, filter_id, filter_json, full_user_id) FROM stdin;
 \.
 
 
@@ -3151,6 +4282,30 @@ COPY public.user_filters (user_id, filter_id, filter_json) FROM stdin;
 --
 
 COPY public.user_ips (user_id, access_token, device_id, ip, user_agent, last_seen) FROM stdin;
+\.
+
+
+--
+-- Data for Name: user_signature_stream; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.user_signature_stream (stream_id, from_user_id, user_ids, instance_name) FROM stdin;
+\.
+
+
+--
+-- Data for Name: user_stats_current; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.user_stats_current (user_id, joined_rooms, completed_delta_stream_id) FROM stdin;
+\.
+
+
+--
+-- Data for Name: user_threepid_id_server; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.user_threepid_id_server (user_id, medium, address, id_server) FROM stdin;
 \.
 
 
@@ -3166,7 +4321,7 @@ COPY public.user_threepids (user_id, medium, address, validated_at, added_at) FR
 -- Data for Name: users; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.users (name, password_hash, creation_ts, admin, upgrade_ts, is_guest, appservice_id, consent_version, consent_server_notice_sent) FROM stdin;
+COPY public.users (name, password_hash, creation_ts, admin, upgrade_ts, is_guest, appservice_id, consent_version, consent_server_notice_sent, user_type, deactivated, shadow_banned, consent_ts, approved, locked, suspended) FROM stdin;
 \.
 
 
@@ -3187,11 +4342,190 @@ COPY public.users_pending_deactivation (user_id) FROM stdin;
 
 
 --
--- Data for Name: users_who_share_rooms; Type: TABLE DATA; Schema: public; Owner: synapse
+-- Data for Name: users_to_send_full_presence_to; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
-COPY public.users_who_share_rooms (user_id, other_user_id, room_id, share_private) FROM stdin;
+COPY public.users_to_send_full_presence_to (user_id, presence_stream_id) FROM stdin;
 \.
+
+
+--
+-- Data for Name: users_who_share_private_rooms; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.users_who_share_private_rooms (user_id, other_user_id, room_id) FROM stdin;
+\.
+
+
+--
+-- Data for Name: worker_locks; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.worker_locks (lock_name, lock_key, instance_name, token, last_renewed_ts) FROM stdin;
+\.
+
+
+--
+-- Data for Name: worker_read_write_locks; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.worker_read_write_locks (lock_name, lock_key, instance_name, write_lock, token, last_renewed_ts) FROM stdin;
+\.
+
+
+--
+-- Data for Name: worker_read_write_locks_mode; Type: TABLE DATA; Schema: public; Owner: synapse
+--
+
+COPY public.worker_read_write_locks_mode (lock_name, lock_key, write_lock, token) FROM stdin;
+\.
+
+
+--
+-- Name: account_data_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.account_data_sequence', 1, true);
+
+
+--
+-- Name: application_services_txn_id_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.application_services_txn_id_seq', 1, false);
+
+
+--
+-- Name: cache_invalidation_stream_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.cache_invalidation_stream_seq', 1, true);
+
+
+--
+-- Name: device_inbox_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.device_inbox_sequence', 1, true);
+
+
+--
+-- Name: device_lists_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.device_lists_sequence', 1, true);
+
+
+--
+-- Name: e2e_cross_signing_keys_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.e2e_cross_signing_keys_sequence', 1, true);
+
+
+--
+-- Name: event_auth_chain_id; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.event_auth_chain_id', 1, false);
+
+
+--
+-- Name: events_backfill_stream_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.events_backfill_stream_seq', 1, true);
+
+
+--
+-- Name: events_stream_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.events_stream_seq', 1, true);
+
+
+--
+-- Name: instance_map_instance_id_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.instance_map_instance_id_seq', 1, false);
+
+
+--
+-- Name: presence_stream_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.presence_stream_sequence', 1, true);
+
+
+--
+-- Name: push_rules_stream_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.push_rules_stream_sequence', 1, true);
+
+
+--
+-- Name: pushers_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.pushers_sequence', 1, true);
+
+
+--
+-- Name: receipts_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.receipts_sequence', 1, true);
+
+
+--
+-- Name: sliding_sync_connection_positions_connection_position_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.sliding_sync_connection_positions_connection_position_seq', 1, false);
+
+
+--
+-- Name: sliding_sync_connection_required_state_required_state_id_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.sliding_sync_connection_required_state_required_state_id_seq', 1, false);
+
+
+--
+-- Name: sliding_sync_connections_connection_key_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.sliding_sync_connections_connection_key_seq', 1, false);
+
+
+--
+-- Name: state_group_id_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.state_group_id_seq', 1, false);
+
+
+--
+-- Name: un_partial_stated_event_stream_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.un_partial_stated_event_stream_sequence', 1, true);
+
+
+--
+-- Name: un_partial_stated_room_stream_sequence; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.un_partial_stated_room_stream_sequence', 1, true);
+
+
+--
+-- Name: user_id_seq; Type: SEQUENCE SET; Schema: public; Owner: synapse
+--
+
+SELECT pg_catalog.setval('public.user_id_seq', 1, false);
 
 
 --
@@ -3219,19 +4553,11 @@ ALTER TABLE ONLY public.account_data
 
 
 --
--- Name: application_services application_services_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: account_validity account_validity_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.application_services
-    ADD CONSTRAINT application_services_pkey PRIMARY KEY (id);
-
-
---
--- Name: application_services_regex application_services_regex_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.application_services_regex
-    ADD CONSTRAINT application_services_regex_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.account_validity
+    ADD CONSTRAINT account_validity_pkey PRIMARY KEY (user_id);
 
 
 --
@@ -3243,14 +4569,6 @@ ALTER TABLE ONLY public.application_services_state
 
 
 --
--- Name: application_services application_services_token_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.application_services
-    ADD CONSTRAINT application_services_token_key UNIQUE (token);
-
-
---
 -- Name: application_services_txns application_services_txns_as_id_txn_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
@@ -3259,11 +4577,11 @@ ALTER TABLE ONLY public.application_services_txns
 
 
 --
--- Name: applied_module_schemas applied_module_schemas_module_name_file_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: appservice_stream_position appservice_stream_position_lock_key; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.applied_module_schemas
-    ADD CONSTRAINT applied_module_schemas_module_name_file_key UNIQUE (module_name, file);
+ALTER TABLE ONLY public.appservice_stream_position
+    ADD CONSTRAINT appservice_stream_position_lock_key UNIQUE (lock);
 
 
 --
@@ -3291,11 +4609,27 @@ ALTER TABLE ONLY public.current_state_events
 
 
 --
--- Name: current_state_resets current_state_resets_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: dehydrated_devices dehydrated_devices_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.current_state_resets
-    ADD CONSTRAINT current_state_resets_pkey PRIMARY KEY (event_stream_ordering);
+ALTER TABLE ONLY public.dehydrated_devices
+    ADD CONSTRAINT dehydrated_devices_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: delayed_events delayed_events_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.delayed_events
+    ADD CONSTRAINT delayed_events_pkey PRIMARY KEY (user_localpart, delay_id);
+
+
+--
+-- Name: delayed_events_stream_pos delayed_events_stream_pos_lock_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.delayed_events_stream_pos
+    ADD CONSTRAINT delayed_events_stream_pos_lock_key UNIQUE (lock);
 
 
 --
@@ -3307,11 +4641,35 @@ ALTER TABLE ONLY public.destination_health
 
 
 --
+-- Name: destination_rooms destination_rooms_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.destination_rooms
+    ADD CONSTRAINT destination_rooms_pkey PRIMARY KEY (destination, room_id);
+
+
+--
 -- Name: destinations destinations_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
 ALTER TABLE ONLY public.destinations
     ADD CONSTRAINT destinations_pkey PRIMARY KEY (destination);
+
+
+--
+-- Name: device_lists_changes_converted_stream_position device_lists_changes_converted_stream_position_lock_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.device_lists_changes_converted_stream_position
+    ADD CONSTRAINT device_lists_changes_converted_stream_position_lock_key UNIQUE (lock);
+
+
+--
+-- Name: device_lists_remote_pending device_lists_remote_pending_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.device_lists_remote_pending
+    ADD CONSTRAINT device_lists_remote_pending_pkey PRIMARY KEY (stream_id);
 
 
 --
@@ -3331,11 +4689,35 @@ ALTER TABLE ONLY public.e2e_device_keys_json
 
 
 --
+-- Name: e2e_fallback_keys_json e2e_fallback_keys_json_uniqueness; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.e2e_fallback_keys_json
+    ADD CONSTRAINT e2e_fallback_keys_json_uniqueness UNIQUE (user_id, device_id, algorithm);
+
+
+--
 -- Name: e2e_one_time_keys_json e2e_one_time_keys_json_uniqueness; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
 ALTER TABLE ONLY public.e2e_one_time_keys_json
     ADD CONSTRAINT e2e_one_time_keys_json_uniqueness UNIQUE (user_id, device_id, algorithm, key_id);
+
+
+--
+-- Name: event_auth_chain_to_calculate event_auth_chain_to_calculate_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.event_auth_chain_to_calculate
+    ADD CONSTRAINT event_auth_chain_to_calculate_pkey PRIMARY KEY (event_id);
+
+
+--
+-- Name: event_auth_chains event_auth_chains_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.event_auth_chains
+    ADD CONSTRAINT event_auth_chains_pkey PRIMARY KEY (event_id);
 
 
 --
@@ -3347,35 +4729,19 @@ ALTER TABLE ONLY public.event_backward_extremities
 
 
 --
--- Name: event_content_hashes event_content_hashes_event_id_algorithm_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: event_expiry event_expiry_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.event_content_hashes
-    ADD CONSTRAINT event_content_hashes_event_id_algorithm_key UNIQUE (event_id, algorithm);
-
-
---
--- Name: event_destinations event_destinations_event_id_destination_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.event_destinations
-    ADD CONSTRAINT event_destinations_event_id_destination_key UNIQUE (event_id, destination);
+ALTER TABLE ONLY public.event_expiry
+    ADD CONSTRAINT event_expiry_pkey PRIMARY KEY (event_id);
 
 
 --
--- Name: event_edge_hashes event_edge_hashes_event_id_prev_event_id_algorithm_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: event_failed_pull_attempts event_failed_pull_attempts_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.event_edge_hashes
-    ADD CONSTRAINT event_edge_hashes_event_id_prev_event_id_algorithm_key UNIQUE (event_id, prev_event_id, algorithm);
-
-
---
--- Name: event_edges event_edges_event_id_prev_event_id_room_id_is_state_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.event_edges
-    ADD CONSTRAINT event_edges_event_id_prev_event_id_room_id_is_state_key UNIQUE (event_id, prev_event_id, room_id, is_state);
+ALTER TABLE ONLY public.event_failed_pull_attempts
+    ADD CONSTRAINT event_failed_pull_attempts_pkey PRIMARY KEY (room_id, event_id);
 
 
 --
@@ -3403,11 +4769,27 @@ ALTER TABLE ONLY public.event_json
 
 
 --
--- Name: event_reference_hashes event_reference_hashes_event_id_algorithm_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: event_labels event_labels_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.event_reference_hashes
-    ADD CONSTRAINT event_reference_hashes_event_id_algorithm_key UNIQUE (event_id, algorithm);
+ALTER TABLE ONLY public.event_labels
+    ADD CONSTRAINT event_labels_pkey PRIMARY KEY (event_id, label);
+
+
+--
+-- Name: event_push_summary_last_receipt_stream_id event_push_summary_last_receipt_stream_id_lock_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.event_push_summary_last_receipt_stream_id
+    ADD CONSTRAINT event_push_summary_last_receipt_stream_id_lock_key UNIQUE (lock);
+
+
+--
+-- Name: event_push_summary_stream_ordering event_push_summary_stream_ordering_lock_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.event_push_summary_stream_ordering
+    ADD CONSTRAINT event_push_summary_stream_ordering_lock_key UNIQUE (lock);
 
 
 --
@@ -3416,14 +4798,6 @@ ALTER TABLE ONLY public.event_reference_hashes
 
 ALTER TABLE ONLY public.event_reports
     ADD CONSTRAINT event_reports_pkey PRIMARY KEY (id);
-
-
---
--- Name: event_signatures event_signatures_event_id_signature_name_key_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.event_signatures
-    ADD CONSTRAINT event_signatures_event_id_signature_name_key_id_key UNIQUE (event_id, signature_name, key_id);
 
 
 --
@@ -3443,14 +4817,6 @@ ALTER TABLE ONLY public.events
 
 
 --
--- Name: events events_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.events
-    ADD CONSTRAINT events_pkey PRIMARY KEY (stream_ordering);
-
-
---
 -- Name: ex_outlier_stream ex_outlier_stream_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
@@ -3459,67 +4825,11 @@ ALTER TABLE ONLY public.ex_outlier_stream
 
 
 --
--- Name: feedback feedback_event_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: instance_map instance_map_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.feedback
-    ADD CONSTRAINT feedback_event_id_key UNIQUE (event_id);
-
-
---
--- Name: group_roles group_roles_group_id_role_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.group_roles
-    ADD CONSTRAINT group_roles_group_id_role_id_key UNIQUE (group_id, role_id);
-
-
---
--- Name: group_room_categories group_room_categories_group_id_category_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.group_room_categories
-    ADD CONSTRAINT group_room_categories_group_id_category_id_key UNIQUE (group_id, category_id);
-
-
---
--- Name: group_summary_roles group_summary_roles_group_id_role_id_role_order_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.group_summary_roles
-    ADD CONSTRAINT group_summary_roles_group_id_role_id_role_order_key UNIQUE (group_id, role_id, role_order);
-
-
---
--- Name: group_summary_room_categories group_summary_room_categories_group_id_category_id_cat_orde_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.group_summary_room_categories
-    ADD CONSTRAINT group_summary_room_categories_group_id_category_id_cat_orde_key UNIQUE (group_id, category_id, cat_order);
-
-
---
--- Name: group_summary_rooms group_summary_rooms_group_id_category_id_room_id_room_order_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.group_summary_rooms
-    ADD CONSTRAINT group_summary_rooms_group_id_category_id_room_id_room_order_key UNIQUE (group_id, category_id, room_id, room_order);
-
-
---
--- Name: guest_access guest_access_event_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.guest_access
-    ADD CONSTRAINT guest_access_event_id_key UNIQUE (event_id);
-
-
---
--- Name: history_visibility history_visibility_event_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.history_visibility
-    ADD CONSTRAINT history_visibility_event_id_key UNIQUE (event_id);
+ALTER TABLE ONLY public.instance_map
+    ADD CONSTRAINT instance_map_pkey PRIMARY KEY (instance_id);
 
 
 --
@@ -3531,11 +4841,11 @@ ALTER TABLE ONLY public.local_media_repository
 
 
 --
--- Name: local_media_repository_thumbnails local_media_repository_thumbn_media_id_thumbnail_width_thum_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: login_tokens login_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.local_media_repository_thumbnails
-    ADD CONSTRAINT local_media_repository_thumbn_media_id_thumbnail_width_thum_key UNIQUE (media_id, thumbnail_width, thumbnail_height, thumbnail_type);
+ALTER TABLE ONLY public.login_tokens
+    ADD CONSTRAINT login_tokens_pkey PRIMARY KEY (token);
 
 
 --
@@ -3555,27 +4865,35 @@ ALTER TABLE ONLY public.open_id_tokens
 
 
 --
--- Name: presence_allow_inbound presence_allow_inbound_observed_user_id_observer_user_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: partial_state_events partial_state_events_event_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.presence_allow_inbound
-    ADD CONSTRAINT presence_allow_inbound_observed_user_id_observer_user_id_key UNIQUE (observed_user_id, observer_user_id);
-
-
---
--- Name: presence_list presence_list_user_id_observed_user_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.presence_list
-    ADD CONSTRAINT presence_list_user_id_observed_user_id_key UNIQUE (user_id, observed_user_id);
+ALTER TABLE ONLY public.partial_state_events
+    ADD CONSTRAINT partial_state_events_event_id_key UNIQUE (event_id);
 
 
 --
--- Name: presence presence_user_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: partial_state_rooms partial_state_rooms_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.presence
-    ADD CONSTRAINT presence_user_id_key UNIQUE (user_id);
+ALTER TABLE ONLY public.partial_state_rooms
+    ADD CONSTRAINT partial_state_rooms_pkey PRIMARY KEY (room_id);
+
+
+--
+-- Name: partial_state_rooms_servers partial_state_rooms_servers_room_id_server_name_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.partial_state_rooms_servers
+    ADD CONSTRAINT partial_state_rooms_servers_room_id_server_name_key UNIQUE (room_id, server_name);
+
+
+--
+-- Name: per_user_experimental_features per_user_experimental_features_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.per_user_experimental_features
+    ADD CONSTRAINT per_user_experimental_features_pkey PRIMARY KEY (user_id, feature);
 
 
 --
@@ -3643,19 +4961,19 @@ ALTER TABLE ONLY public.pushers
 
 
 --
--- Name: receipts_graph receipts_graph_uniqueness; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: receipts_graph receipts_graph_uniqueness_thread; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
 ALTER TABLE ONLY public.receipts_graph
-    ADD CONSTRAINT receipts_graph_uniqueness UNIQUE (room_id, receipt_type, user_id);
+    ADD CONSTRAINT receipts_graph_uniqueness_thread UNIQUE (room_id, receipt_type, user_id, thread_id);
 
 
 --
--- Name: receipts_linearized receipts_linearized_uniqueness; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: receipts_linearized receipts_linearized_uniqueness_thread; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
 ALTER TABLE ONLY public.receipts_linearized
-    ADD CONSTRAINT receipts_linearized_uniqueness UNIQUE (room_id, receipt_type, user_id);
+    ADD CONSTRAINT receipts_linearized_uniqueness_thread UNIQUE (room_id, receipt_type, user_id, thread_id);
 
 
 --
@@ -3675,6 +4993,30 @@ ALTER TABLE ONLY public.redactions
 
 
 --
+-- Name: refresh_tokens refresh_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_token_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_token_key UNIQUE (token);
+
+
+--
+-- Name: registration_tokens registration_tokens_token_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.registration_tokens
+    ADD CONSTRAINT registration_tokens_token_key UNIQUE (token);
+
+
+--
 -- Name: rejections rejections_event_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
@@ -3688,14 +5030,6 @@ ALTER TABLE ONLY public.rejections
 
 ALTER TABLE ONLY public.remote_media_cache
     ADD CONSTRAINT remote_media_cache_media_origin_media_id_key UNIQUE (media_origin, media_id);
-
-
---
--- Name: remote_media_cache_thumbnails remote_media_cache_thumbnails_media_origin_media_id_thumbna_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.remote_media_cache_thumbnails
-    ADD CONSTRAINT remote_media_cache_thumbnails_media_origin_media_id_thumbna_key UNIQUE (media_origin, media_id, thumbnail_width, thumbnail_height, thumbnail_type);
 
 
 --
@@ -3723,11 +5057,11 @@ ALTER TABLE ONLY public.room_depth
 
 
 --
--- Name: room_hosts room_hosts_room_id_host_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: room_forgetter_stream_pos room_forgetter_stream_pos_lock_key; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.room_hosts
-    ADD CONSTRAINT room_hosts_room_id_host_key UNIQUE (room_id, host);
+ALTER TABLE ONLY public.room_forgetter_stream_pos
+    ADD CONSTRAINT room_forgetter_stream_pos_lock_key UNIQUE (lock);
 
 
 --
@@ -3739,11 +5073,27 @@ ALTER TABLE ONLY public.room_memberships
 
 
 --
--- Name: room_names room_names_event_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: room_reports room_reports_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.room_names
-    ADD CONSTRAINT room_names_event_id_key UNIQUE (event_id);
+ALTER TABLE ONLY public.room_reports
+    ADD CONSTRAINT room_reports_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: room_retention room_retention_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.room_retention
+    ADD CONSTRAINT room_retention_pkey PRIMARY KEY (room_id, event_id);
+
+
+--
+-- Name: room_stats_current room_stats_current_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.room_stats_current
+    ADD CONSTRAINT room_stats_current_pkey PRIMARY KEY (room_id);
 
 
 --
@@ -3771,11 +5121,19 @@ ALTER TABLE ONLY public.rooms
 
 
 --
--- Name: sent_transactions sent_transactions_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: scheduled_tasks scheduled_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.sent_transactions
-    ADD CONSTRAINT sent_transactions_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.scheduled_tasks
+    ADD CONSTRAINT scheduled_tasks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: schema_compat_version schema_compat_version_lock_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.schema_compat_version
+    ADD CONSTRAINT schema_compat_version_lock_key UNIQUE (lock);
 
 
 --
@@ -3795,11 +5153,59 @@ ALTER TABLE ONLY public.server_signature_keys
 
 
 --
--- Name: server_tls_certificates server_tls_certificates_server_name_fingerprint_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: sessions sessions_session_type_session_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.server_tls_certificates
-    ADD CONSTRAINT server_tls_certificates_server_name_fingerprint_key UNIQUE (server_name, fingerprint);
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_session_type_session_id_key UNIQUE (session_type, session_id);
+
+
+--
+-- Name: sliding_sync_connection_positions sliding_sync_connection_positions_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_connection_positions
+    ADD CONSTRAINT sliding_sync_connection_positions_pkey PRIMARY KEY (connection_position);
+
+
+--
+-- Name: sliding_sync_connection_required_state sliding_sync_connection_required_state_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_connection_required_state
+    ADD CONSTRAINT sliding_sync_connection_required_state_pkey PRIMARY KEY (required_state_id);
+
+
+--
+-- Name: sliding_sync_connections sliding_sync_connections_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_connections
+    ADD CONSTRAINT sliding_sync_connections_pkey PRIMARY KEY (connection_key);
+
+
+--
+-- Name: sliding_sync_joined_rooms sliding_sync_joined_rooms_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_joined_rooms
+    ADD CONSTRAINT sliding_sync_joined_rooms_pkey PRIMARY KEY (room_id);
+
+
+--
+-- Name: sliding_sync_joined_rooms_to_recalculate sliding_sync_joined_rooms_to_recalculate_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_joined_rooms_to_recalculate
+    ADD CONSTRAINT sliding_sync_joined_rooms_to_recalculate_pkey PRIMARY KEY (room_id);
+
+
+--
+-- Name: sliding_sync_membership_snapshots sliding_sync_membership_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_membership_snapshots
+    ADD CONSTRAINT sliding_sync_membership_snapshots_pkey PRIMARY KEY (room_id, user_id);
 
 
 --
@@ -3811,14 +5217,6 @@ ALTER TABLE ONLY public.state_events
 
 
 --
--- Name: state_forward_extremities state_forward_extremities_event_id_room_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.state_forward_extremities
-    ADD CONSTRAINT state_forward_extremities_event_id_room_id_key UNIQUE (event_id, room_id);
-
-
---
 -- Name: state_groups state_groups_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
@@ -3827,19 +5225,107 @@ ALTER TABLE ONLY public.state_groups
 
 
 --
--- Name: topics topics_event_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: stats_incremental_position stats_incremental_position_lock_key; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.topics
-    ADD CONSTRAINT topics_event_id_key UNIQUE (event_id);
+ALTER TABLE ONLY public.stats_incremental_position
+    ADD CONSTRAINT stats_incremental_position_lock_key UNIQUE (lock);
 
 
 --
--- Name: transaction_id_to_pdu transaction_id_to_pdu_transaction_id_destination_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+-- Name: threads threads_uniqueness; Type: CONSTRAINT; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.transaction_id_to_pdu
-    ADD CONSTRAINT transaction_id_to_pdu_transaction_id_destination_key UNIQUE (transaction_id, destination);
+ALTER TABLE ONLY public.threads
+    ADD CONSTRAINT threads_uniqueness UNIQUE (room_id, thread_id);
+
+
+--
+-- Name: threepid_validation_session threepid_validation_session_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.threepid_validation_session
+    ADD CONSTRAINT threepid_validation_session_pkey PRIMARY KEY (session_id);
+
+
+--
+-- Name: threepid_validation_token threepid_validation_token_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.threepid_validation_token
+    ADD CONSTRAINT threepid_validation_token_pkey PRIMARY KEY (token);
+
+
+--
+-- Name: ui_auth_sessions_credentials ui_auth_sessions_credentials_session_id_stage_type_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.ui_auth_sessions_credentials
+    ADD CONSTRAINT ui_auth_sessions_credentials_session_id_stage_type_key UNIQUE (session_id, stage_type);
+
+
+--
+-- Name: ui_auth_sessions_ips ui_auth_sessions_ips_session_id_ip_user_agent_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.ui_auth_sessions_ips
+    ADD CONSTRAINT ui_auth_sessions_ips_session_id_ip_user_agent_key UNIQUE (session_id, ip, user_agent);
+
+
+--
+-- Name: ui_auth_sessions ui_auth_sessions_session_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.ui_auth_sessions
+    ADD CONSTRAINT ui_auth_sessions_session_id_key UNIQUE (session_id);
+
+
+--
+-- Name: un_partial_stated_event_stream un_partial_stated_event_stream_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.un_partial_stated_event_stream
+    ADD CONSTRAINT un_partial_stated_event_stream_pkey PRIMARY KEY (stream_id);
+
+
+--
+-- Name: un_partial_stated_room_stream un_partial_stated_room_stream_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.un_partial_stated_room_stream
+    ADD CONSTRAINT un_partial_stated_room_stream_pkey PRIMARY KEY (stream_id);
+
+
+--
+-- Name: user_directory_stale_remote_users user_directory_stale_remote_users_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.user_directory_stale_remote_users
+    ADD CONSTRAINT user_directory_stale_remote_users_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: user_directory_stream_pos user_directory_stream_pos_lock_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.user_directory_stream_pos
+    ADD CONSTRAINT user_directory_stream_pos_lock_key UNIQUE (lock);
+
+
+--
+-- Name: user_external_ids user_external_ids_auth_provider_external_id_key; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.user_external_ids
+    ADD CONSTRAINT user_external_ids_auth_provider_external_id_key UNIQUE (auth_provider, external_id);
+
+
+--
+-- Name: user_stats_current user_stats_current_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.user_stats_current
+    ADD CONSTRAINT user_stats_current_pkey PRIMARY KEY (user_id);
 
 
 --
@@ -3851,10 +5337,25 @@ ALTER TABLE ONLY public.users
 
 
 --
+-- Name: users_to_send_full_presence_to users_to_send_full_presence_to_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.users_to_send_full_presence_to
+    ADD CONSTRAINT users_to_send_full_presence_to_pkey PRIMARY KEY (user_id);
+
+
+--
 -- Name: access_tokens_device_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
 CREATE INDEX access_tokens_device_id ON public.access_tokens USING btree (user_id, device_id);
+
+
+--
+-- Name: access_tokens_refresh_token_id_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX access_tokens_refresh_token_id_idx ON public.access_tokens USING btree (refresh_token_id);
 
 
 --
@@ -3886,10 +5387,17 @@ CREATE UNIQUE INDEX blocked_rooms_idx ON public.blocked_rooms USING btree (room_
 
 
 --
--- Name: cache_invalidation_stream_id; Type: INDEX; Schema: public; Owner: synapse
+-- Name: cache_invalidation_stream_by_instance_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX cache_invalidation_stream_id ON public.cache_invalidation_stream USING btree (stream_id);
+CREATE UNIQUE INDEX cache_invalidation_stream_by_instance_id ON public.cache_invalidation_stream_by_instance USING btree (stream_id);
+
+
+--
+-- Name: cache_invalidation_stream_by_instance_instance_index; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX cache_invalidation_stream_by_instance_instance_index ON public.cache_invalidation_stream_by_instance USING btree (instance_name, stream_id);
 
 
 --
@@ -3907,10 +5415,66 @@ CREATE INDEX current_state_events_member_index ON public.current_state_events US
 
 
 --
+-- Name: current_state_events_members_room_index; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX current_state_events_members_room_index ON public.current_state_events USING btree (room_id, membership) WHERE (type = 'm.room.member'::text);
+
+
+--
+-- Name: current_state_events_stream_ordering_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX current_state_events_stream_ordering_idx ON public.current_state_events USING btree (event_stream_ordering);
+
+
+--
+-- Name: delayed_events_is_processed; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX delayed_events_is_processed ON public.delayed_events USING btree (is_processed);
+
+
+--
+-- Name: delayed_events_room_state_event_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX delayed_events_room_state_event_idx ON public.delayed_events USING btree (room_id, event_type, state_key) WHERE (state_key IS NOT NULL);
+
+
+--
+-- Name: delayed_events_send_ts; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX delayed_events_send_ts ON public.delayed_events USING btree (send_ts);
+
+
+--
 -- Name: deleted_pushers_stream_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
 CREATE INDEX deleted_pushers_stream_id ON public.deleted_pushers USING btree (stream_id);
+
+
+--
+-- Name: destination_rooms_room_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX destination_rooms_room_id ON public.destination_rooms USING btree (room_id);
+
+
+--
+-- Name: device_auth_providers_devices; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX device_auth_providers_devices ON public.device_auth_providers USING btree (user_id, device_id);
+
+
+--
+-- Name: device_auth_providers_sessions; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX device_auth_providers_sessions ON public.device_auth_providers USING btree (auth_provider_id, auth_provider_session_id);
 
 
 --
@@ -3949,10 +5513,31 @@ CREATE INDEX device_inbox_user_stream_id ON public.device_inbox USING btree (use
 
 
 --
--- Name: device_lists_outbound_last_success_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: device_lists_changes_in_room_by_room_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX device_lists_outbound_last_success_idx ON public.device_lists_outbound_last_success USING btree (destination, user_id, stream_id);
+CREATE INDEX device_lists_changes_in_room_by_room_idx ON public.device_lists_changes_in_room USING btree (room_id, stream_id);
+
+
+--
+-- Name: device_lists_changes_in_stream_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX device_lists_changes_in_stream_id ON public.device_lists_changes_in_room USING btree (stream_id, room_id);
+
+
+--
+-- Name: device_lists_changes_in_stream_id_unconverted; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX device_lists_changes_in_stream_id_unconverted ON public.device_lists_changes_in_room USING btree (stream_id) WHERE (NOT converted_to_destinations);
+
+
+--
+-- Name: device_lists_outbound_last_success_unique_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX device_lists_outbound_last_success_unique_idx ON public.device_lists_outbound_last_success USING btree (destination, user_id);
 
 
 --
@@ -3991,6 +5576,27 @@ CREATE UNIQUE INDEX device_lists_remote_extremeties_unique_idx ON public.device_
 
 
 --
+-- Name: device_lists_remote_pending_user_device_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX device_lists_remote_pending_user_device_id ON public.device_lists_remote_pending USING btree (user_id, device_id);
+
+
+--
+-- Name: device_lists_remote_resync_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX device_lists_remote_resync_idx ON public.device_lists_remote_resync USING btree (user_id);
+
+
+--
+-- Name: device_lists_remote_resync_ts_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX device_lists_remote_resync_ts_idx ON public.device_lists_remote_resync USING btree (added_ts);
+
+
+--
 -- Name: device_lists_stream_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4005,10 +5611,31 @@ CREATE INDEX device_lists_stream_user_id ON public.device_lists_stream USING btr
 
 
 --
--- Name: e2e_room_keys_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: e2e_cross_signing_keys_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE UNIQUE INDEX e2e_room_keys_idx ON public.e2e_room_keys USING btree (user_id, room_id, session_id);
+CREATE UNIQUE INDEX e2e_cross_signing_keys_idx ON public.e2e_cross_signing_keys USING btree (user_id, keytype, stream_id);
+
+
+--
+-- Name: e2e_cross_signing_keys_stream_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX e2e_cross_signing_keys_stream_idx ON public.e2e_cross_signing_keys USING btree (stream_id);
+
+
+--
+-- Name: e2e_cross_signing_signatures2_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX e2e_cross_signing_signatures2_idx ON public.e2e_cross_signing_signatures USING btree (user_id, target_user_id, target_device_id);
+
+
+--
+-- Name: e2e_room_keys_room_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX e2e_room_keys_room_id ON public.e2e_room_keys USING btree (room_id);
 
 
 --
@@ -4016,6 +5643,13 @@ CREATE UNIQUE INDEX e2e_room_keys_idx ON public.e2e_room_keys USING btree (user_
 --
 
 CREATE UNIQUE INDEX e2e_room_keys_versions_idx ON public.e2e_room_keys_versions USING btree (user_id, version);
+
+
+--
+-- Name: e2e_room_keys_with_version_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX e2e_room_keys_with_version_idx ON public.e2e_room_keys USING btree (user_id, version, room_id, session_id);
 
 
 --
@@ -4037,13 +5671,6 @@ CREATE INDEX ev_b_extrem_id ON public.event_backward_extremities USING btree (ev
 --
 
 CREATE INDEX ev_b_extrem_room ON public.event_backward_extremities USING btree (room_id);
-
-
---
--- Name: ev_edges_id; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX ev_edges_id ON public.event_edges USING btree (event_id);
 
 
 --
@@ -4075,6 +5702,34 @@ CREATE INDEX evauth_edges_id ON public.event_auth USING btree (event_id);
 
 
 --
+-- Name: event_auth_chain_links_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX event_auth_chain_links_idx ON public.event_auth_chain_links USING btree (origin_chain_id, target_chain_id);
+
+
+--
+-- Name: event_auth_chain_links_origin_index; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX event_auth_chain_links_origin_index ON public.event_auth_chain_links USING btree (origin_chain_id, origin_sequence_number);
+
+
+--
+-- Name: event_auth_chain_to_calculate_rm_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX event_auth_chain_to_calculate_rm_id ON public.event_auth_chain_to_calculate USING btree (room_id);
+
+
+--
+-- Name: event_auth_chains_c_seq_index; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX event_auth_chains_c_seq_index ON public.event_auth_chains USING btree (chain_id, sequence_number);
+
+
+--
 -- Name: event_contains_url_index; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4082,10 +5737,31 @@ CREATE INDEX event_contains_url_index ON public.events USING btree (room_id, top
 
 
 --
--- Name: event_json_room_id; Type: INDEX; Schema: public; Owner: synapse
+-- Name: event_edges_event_id_prev_event_id_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX event_json_room_id ON public.event_json USING btree (room_id);
+CREATE UNIQUE INDEX event_edges_event_id_prev_event_id_idx ON public.event_edges USING btree (event_id, prev_event_id);
+
+
+--
+-- Name: event_expiry_expiry_ts_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX event_expiry_expiry_ts_idx ON public.event_expiry USING btree (expiry_ts);
+
+
+--
+-- Name: event_failed_pull_attempts_room_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX event_failed_pull_attempts_room_id ON public.event_failed_pull_attempts USING btree (room_id);
+
+
+--
+-- Name: event_labels_room_id_label_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX event_labels_room_id_label_idx ON public.event_labels USING btree (room_id, label, topological_ordering);
 
 
 --
@@ -4117,6 +5793,13 @@ CREATE INDEX event_push_actions_staging_id ON public.event_push_actions_staging 
 
 
 --
+-- Name: event_push_actions_stream_highlight_index; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX event_push_actions_stream_highlight_index ON public.event_push_actions USING btree (highlight, stream_ordering) WHERE (highlight = 0);
+
+
+--
 -- Name: event_push_actions_stream_ordering; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4131,17 +5814,31 @@ CREATE INDEX event_push_actions_u_highlight ON public.event_push_actions USING b
 
 
 --
--- Name: event_push_summary_user_rm; Type: INDEX; Schema: public; Owner: synapse
+-- Name: event_push_summary_index_room_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX event_push_summary_user_rm ON public.event_push_summary USING btree (user_id, room_id);
+CREATE INDEX event_push_summary_index_room_id ON public.event_push_summary USING btree (room_id);
 
 
 --
--- Name: event_reference_hashes_id; Type: INDEX; Schema: public; Owner: synapse
+-- Name: event_push_summary_unique_index2; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX event_reference_hashes_id ON public.event_reference_hashes USING btree (event_id);
+CREATE UNIQUE INDEX event_push_summary_unique_index2 ON public.event_push_summary USING btree (user_id, room_id, thread_id);
+
+
+--
+-- Name: event_relations_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX event_relations_id ON public.event_relations USING btree (event_id);
+
+
+--
+-- Name: event_relations_relates; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX event_relations_relates ON public.event_relations USING btree (relates_to_id, relation_type, aggregation_key);
 
 
 --
@@ -4173,17 +5870,38 @@ CREATE INDEX event_to_state_groups_sg_index ON public.event_to_state_groups USIN
 
 
 --
+-- Name: event_txn_id_device_id_event_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX event_txn_id_device_id_event_id ON public.event_txn_id_device_id USING btree (event_id);
+
+
+--
+-- Name: event_txn_id_device_id_ts; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX event_txn_id_device_id_ts ON public.event_txn_id_device_id USING btree (inserted_ts);
+
+
+--
+-- Name: event_txn_id_device_id_txn_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX event_txn_id_device_id_txn_id ON public.event_txn_id_device_id USING btree (room_id, user_id, device_id, txn_id);
+
+
+--
+-- Name: events_jump_to_date_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX events_jump_to_date_idx ON public.events USING btree (room_id, origin_server_ts) WHERE (NOT outlier);
+
+
+--
 -- Name: events_order_room; Type: INDEX; Schema: public; Owner: synapse
 --
 
 CREATE INDEX events_order_room ON public.events USING btree (room_id, topological_ordering, stream_ordering);
-
-
---
--- Name: events_room_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX events_room_idx ON public.events USING btree (room_id, thread_id);
 
 
 --
@@ -4194,6 +5912,13 @@ CREATE INDEX events_room_stream ON public.events USING btree (room_id, stream_or
 
 
 --
+-- Name: events_stream_ordering; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX events_stream_ordering ON public.events USING btree (stream_ordering);
+
+
+--
 -- Name: events_ts; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4201,143 +5926,80 @@ CREATE INDEX events_ts ON public.events USING btree (origin_server_ts, stream_or
 
 
 --
--- Name: federation_stream_position_type_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: federation_inbound_events_staging_instance_event; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE UNIQUE INDEX federation_stream_position_type_idx ON public.federation_stream_position USING btree (type);
-
-
---
--- Name: group_attestations_remote_g_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX group_attestations_remote_g_idx ON public.group_attestations_remote USING btree (group_id, user_id);
+CREATE UNIQUE INDEX federation_inbound_events_staging_instance_event ON public.federation_inbound_events_staging USING btree (origin, event_id);
 
 
 --
--- Name: group_attestations_remote_u_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: federation_inbound_events_staging_room; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX group_attestations_remote_u_idx ON public.group_attestations_remote USING btree (user_id);
-
-
---
--- Name: group_attestations_remote_v_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX group_attestations_remote_v_idx ON public.group_attestations_remote USING btree (valid_until_ms);
+CREATE INDEX federation_inbound_events_staging_room ON public.federation_inbound_events_staging USING btree (room_id, received_ts);
 
 
 --
--- Name: group_attestations_renewals_g_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: federation_stream_position_instance; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX group_attestations_renewals_g_idx ON public.group_attestations_renewals USING btree (group_id, user_id);
-
-
---
--- Name: group_attestations_renewals_u_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX group_attestations_renewals_u_idx ON public.group_attestations_renewals USING btree (user_id);
+CREATE UNIQUE INDEX federation_stream_position_instance ON public.federation_stream_position USING btree (type, instance_name);
 
 
 --
--- Name: group_attestations_renewals_v_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: full_users_unique_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX group_attestations_renewals_v_idx ON public.group_attestations_renewals USING btree (valid_until_ms);
-
-
---
--- Name: group_invites_g_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE UNIQUE INDEX group_invites_g_idx ON public.group_invites USING btree (group_id, user_id);
+CREATE UNIQUE INDEX full_users_unique_idx ON public.user_filters USING btree (full_user_id, filter_id);
 
 
 --
--- Name: group_invites_u_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: ignored_users_ignored_user_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX group_invites_u_idx ON public.group_invites USING btree (user_id);
-
-
---
--- Name: group_rooms_g_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE UNIQUE INDEX group_rooms_g_idx ON public.group_rooms USING btree (group_id, room_id);
+CREATE INDEX ignored_users_ignored_user_id ON public.ignored_users USING btree (ignored_user_id);
 
 
 --
--- Name: group_rooms_r_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: ignored_users_uniqueness; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX group_rooms_r_idx ON public.group_rooms USING btree (room_id);
-
-
---
--- Name: group_summary_rooms_g_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE UNIQUE INDEX group_summary_rooms_g_idx ON public.group_summary_rooms USING btree (group_id, room_id, category_id);
+CREATE UNIQUE INDEX ignored_users_uniqueness ON public.ignored_users USING btree (ignorer_user_id, ignored_user_id);
 
 
 --
--- Name: group_summary_users_g_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: instance_map_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX group_summary_users_g_idx ON public.group_summary_users USING btree (group_id);
-
-
---
--- Name: group_users_g_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE UNIQUE INDEX group_users_g_idx ON public.group_users USING btree (group_id, user_id);
+CREATE UNIQUE INDEX instance_map_idx ON public.instance_map USING btree (instance_name);
 
 
 --
--- Name: group_users_u_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: local_current_membership_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX group_users_u_idx ON public.group_users USING btree (user_id);
-
-
---
--- Name: groups_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE UNIQUE INDEX groups_idx ON public.groups USING btree (group_id);
+CREATE UNIQUE INDEX local_current_membership_idx ON public.local_current_membership USING btree (user_id, room_id);
 
 
 --
--- Name: local_group_membership_g_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: local_current_membership_room_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX local_group_membership_g_idx ON public.local_group_membership USING btree (group_id);
-
-
---
--- Name: local_group_membership_u_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX local_group_membership_u_idx ON public.local_group_membership USING btree (user_id, group_id);
+CREATE INDEX local_current_membership_room_idx ON public.local_current_membership USING btree (room_id);
 
 
 --
--- Name: local_invites_for_user_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: local_current_membership_stream_ordering_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX local_invites_for_user_idx ON public.local_invites USING btree (invitee, locally_rejected, replaced_by, room_id);
+CREATE INDEX local_current_membership_stream_ordering_idx ON public.local_current_membership USING btree (event_stream_ordering);
 
 
 --
--- Name: local_invites_id; Type: INDEX; Schema: public; Owner: synapse
+-- Name: local_media_repository_thumbn_media_id_width_height_method_key; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX local_invites_id ON public.local_invites USING btree (stream_id);
+CREATE UNIQUE INDEX local_media_repository_thumbn_media_id_width_height_method_key ON public.local_media_repository_thumbnails USING btree (media_id, thumbnail_width, thumbnail_height, thumbnail_type, thumbnail_method);
 
 
 --
@@ -4376,6 +6038,20 @@ CREATE INDEX local_media_repository_url_idx ON public.local_media_repository USI
 
 
 --
+-- Name: login_tokens_auth_provider_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX login_tokens_auth_provider_idx ON public.login_tokens USING btree (auth_provider_id, auth_provider_session_id);
+
+
+--
+-- Name: login_tokens_expiry_time_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX login_tokens_expiry_time_idx ON public.login_tokens USING btree (expiry_ts);
+
+
+--
 -- Name: monthly_active_users_time_stamp; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4397,10 +6073,10 @@ CREATE INDEX open_id_tokens_ts_valid_until_ms ON public.open_id_tokens USING btr
 
 
 --
--- Name: presence_list_user_id; Type: INDEX; Schema: public; Owner: synapse
+-- Name: partial_state_events_room_id_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX presence_list_user_id ON public.presence_list USING btree (user_id);
+CREATE INDEX partial_state_events_room_id_idx ON public.partial_state_events USING btree (room_id);
 
 
 --
@@ -4411,6 +6087,13 @@ CREATE INDEX presence_stream_id ON public.presence_stream USING btree (stream_id
 
 
 --
+-- Name: presence_stream_state_not_offline_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX presence_stream_state_not_offline_idx ON public.presence_stream USING btree (state) WHERE (state <> 'offline'::text);
+
+
+--
 -- Name: presence_stream_user_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4418,24 +6101,17 @@ CREATE INDEX presence_stream_user_id ON public.presence_stream USING btree (user
 
 
 --
+-- Name: profiles_full_user_id_key; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX profiles_full_user_id_key ON public.profiles USING btree (full_user_id);
+
+
+--
 -- Name: public_room_index; Type: INDEX; Schema: public; Owner: synapse
 --
 
 CREATE INDEX public_room_index ON public.rooms USING btree (is_public);
-
-
---
--- Name: public_room_list_stream_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX public_room_list_stream_idx ON public.public_room_list_stream USING btree (stream_id);
-
-
---
--- Name: public_room_list_stream_rm_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX public_room_list_stream_rm_idx ON public.public_room_list_stream USING btree (room_id, stream_id);
 
 
 --
@@ -4474,6 +6150,20 @@ CREATE UNIQUE INDEX ratelimit_override_idx ON public.ratelimit_override USING bt
 
 
 --
+-- Name: receipts_graph_unique_index; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX receipts_graph_unique_index ON public.receipts_graph USING btree (room_id, receipt_type, user_id) WHERE (thread_id IS NULL);
+
+
+--
+-- Name: receipts_linearized_event_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX receipts_linearized_event_id ON public.receipts_linearized USING btree (room_id, event_id);
+
+
+--
 -- Name: receipts_linearized_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4485,6 +6175,13 @@ CREATE INDEX receipts_linearized_id ON public.receipts_linearized USING btree (s
 --
 
 CREATE INDEX receipts_linearized_room_stream ON public.receipts_linearized USING btree (room_id, stream_id);
+
+
+--
+-- Name: receipts_linearized_unique_index; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX receipts_linearized_unique_index ON public.receipts_linearized USING btree (room_id, receipt_type, user_id) WHERE (thread_id IS NULL);
 
 
 --
@@ -4502,6 +6199,13 @@ CREATE INDEX received_transactions_ts ON public.received_transactions USING btre
 
 
 --
+-- Name: redactions_have_censored_ts; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX redactions_have_censored_ts ON public.redactions USING btree (received_ts) WHERE (NOT have_censored);
+
+
+--
 -- Name: redactions_redacts; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4509,17 +6213,24 @@ CREATE INDEX redactions_redacts ON public.redactions USING btree (redacts);
 
 
 --
--- Name: remote_profile_cache_time; Type: INDEX; Schema: public; Owner: synapse
+-- Name: refresh_tokens_next_token_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX remote_profile_cache_time ON public.remote_profile_cache USING btree (last_check);
+CREATE INDEX refresh_tokens_next_token_id ON public.refresh_tokens USING btree (next_token_id) WHERE (next_token_id IS NOT NULL);
 
 
 --
--- Name: remote_profile_cache_user_id; Type: INDEX; Schema: public; Owner: synapse
+-- Name: remote_media_repository_thumbn_media_origin_id_width_height_met; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE UNIQUE INDEX remote_profile_cache_user_id ON public.remote_profile_cache USING btree (user_id);
+CREATE UNIQUE INDEX remote_media_repository_thumbn_media_origin_id_width_height_met ON public.remote_media_cache_thumbnails USING btree (media_origin, media_id, thumbnail_width, thumbnail_height, thumbnail_type, thumbnail_method);
+
+
+--
+-- Name: room_account_data_room_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX room_account_data_room_id ON public.room_account_data USING btree (room_id);
 
 
 --
@@ -4544,10 +6255,10 @@ CREATE INDEX room_aliases_id ON public.room_aliases USING btree (room_id);
 
 
 --
--- Name: room_depth_room; Type: INDEX; Schema: public; Owner: synapse
+-- Name: room_membership_user_room_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX room_depth_room ON public.room_depth USING btree (room_id);
+CREATE INDEX room_membership_user_room_idx ON public.room_memberships USING btree (user_id, room_id);
 
 
 --
@@ -4558,6 +6269,13 @@ CREATE INDEX room_memberships_room_id ON public.room_memberships USING btree (ro
 
 
 --
+-- Name: room_memberships_stream_ordering_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX room_memberships_stream_ordering_idx ON public.room_memberships USING btree (event_stream_ordering);
+
+
+--
 -- Name: room_memberships_user_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4565,38 +6283,115 @@ CREATE INDEX room_memberships_user_id ON public.room_memberships USING btree (us
 
 
 --
--- Name: room_names_room_id; Type: INDEX; Schema: public; Owner: synapse
+-- Name: room_memberships_user_room_forgotten; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX room_names_room_id ON public.room_names USING btree (room_id);
-
-
---
--- Name: sent_transaction_txn_id; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX sent_transaction_txn_id ON public.sent_transactions USING btree (transaction_id);
+CREATE INDEX room_memberships_user_room_forgotten ON public.room_memberships USING btree (user_id, room_id) WHERE (forgotten = 1);
 
 
 --
--- Name: sent_transactions_ts; Type: INDEX; Schema: public; Owner: synapse
+-- Name: room_retention_max_lifetime_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX sent_transactions_ts ON public.sent_transactions USING btree (ts);
-
-
---
--- Name: st_extrem_keys; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX st_extrem_keys ON public.state_forward_extremities USING btree (room_id, type, state_key);
+CREATE INDEX room_retention_max_lifetime_idx ON public.room_retention USING btree (max_lifetime);
 
 
 --
--- Name: state_group_edges_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: room_stats_earliest_token_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX state_group_edges_idx ON public.state_group_edges USING btree (state_group);
+CREATE UNIQUE INDEX room_stats_earliest_token_idx ON public.room_stats_earliest_token USING btree (room_id);
+
+
+--
+-- Name: room_stats_state_room; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX room_stats_state_room ON public.room_stats_state USING btree (room_id);
+
+
+--
+-- Name: scheduled_tasks_status; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX scheduled_tasks_status ON public.scheduled_tasks USING btree (status);
+
+
+--
+-- Name: scheduled_tasks_timestamp; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX scheduled_tasks_timestamp ON public.scheduled_tasks USING btree ("timestamp");
+
+
+--
+-- Name: sliding_sync_connection_positions_key; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX sliding_sync_connection_positions_key ON public.sliding_sync_connection_positions USING btree (connection_key);
+
+
+--
+-- Name: sliding_sync_connection_positions_ts_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX sliding_sync_connection_positions_ts_idx ON public.sliding_sync_connection_positions USING btree (created_ts);
+
+
+--
+-- Name: sliding_sync_connection_required_state_conn_pos; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX sliding_sync_connection_required_state_conn_pos ON public.sliding_sync_connection_required_state USING btree (connection_key);
+
+
+--
+-- Name: sliding_sync_connection_room_configs_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX sliding_sync_connection_room_configs_idx ON public.sliding_sync_connection_room_configs USING btree (connection_position, room_id);
+
+
+--
+-- Name: sliding_sync_connection_streams_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX sliding_sync_connection_streams_idx ON public.sliding_sync_connection_streams USING btree (connection_position, room_id, stream);
+
+
+--
+-- Name: sliding_sync_connections_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX sliding_sync_connections_idx ON public.sliding_sync_connections USING btree (user_id, effective_device_id, conn_id);
+
+
+--
+-- Name: sliding_sync_connections_ts_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX sliding_sync_connections_ts_idx ON public.sliding_sync_connections USING btree (created_ts);
+
+
+--
+-- Name: sliding_sync_joined_rooms_event_stream_ordering; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX sliding_sync_joined_rooms_event_stream_ordering ON public.sliding_sync_joined_rooms USING btree (event_stream_ordering);
+
+
+--
+-- Name: sliding_sync_membership_snapshots_event_stream_ordering; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX sliding_sync_membership_snapshots_event_stream_ordering ON public.sliding_sync_membership_snapshots USING btree (event_stream_ordering);
+
+
+--
+-- Name: sliding_sync_membership_snapshots_user_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX sliding_sync_membership_snapshots_user_id ON public.sliding_sync_membership_snapshots USING btree (user_id);
 
 
 --
@@ -4604,6 +6399,20 @@ CREATE INDEX state_group_edges_idx ON public.state_group_edges USING btree (stat
 --
 
 CREATE INDEX state_group_edges_prev_idx ON public.state_group_edges USING btree (prev_state_group);
+
+
+--
+-- Name: state_group_edges_unique_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX state_group_edges_unique_idx ON public.state_group_edges USING btree (state_group, prev_state_group);
+
+
+--
+-- Name: state_groups_room_id_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX state_groups_room_id_idx ON public.state_groups USING btree (room_id);
 
 
 --
@@ -4628,6 +6437,20 @@ CREATE INDEX stream_ordering_to_exterm_rm_idx ON public.stream_ordering_to_exter
 
 
 --
+-- Name: stream_positions_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX stream_positions_idx ON public.stream_positions USING btree (stream_name, instance_name);
+
+
+--
+-- Name: threads_ordering_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX threads_ordering_idx ON public.threads USING btree (room_id, topological_ordering, stream_ordering);
+
+
+--
 -- Name: threepid_guest_access_tokens_index; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4635,17 +6458,31 @@ CREATE UNIQUE INDEX threepid_guest_access_tokens_index ON public.threepid_guest_
 
 
 --
--- Name: topics_room_id; Type: INDEX; Schema: public; Owner: synapse
+-- Name: threepid_validation_token_session_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX topics_room_id ON public.topics USING btree (room_id);
+CREATE INDEX threepid_validation_token_session_id ON public.threepid_validation_token USING btree (session_id);
 
 
 --
--- Name: transaction_id_to_pdu_dest; Type: INDEX; Schema: public; Owner: synapse
+-- Name: timeline_gaps_room_id; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX transaction_id_to_pdu_dest ON public.transaction_id_to_pdu USING btree (destination);
+CREATE INDEX timeline_gaps_room_id ON public.timeline_gaps USING btree (room_id, stream_ordering);
+
+
+--
+-- Name: un_partial_stated_event_stream_room_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX un_partial_stated_event_stream_room_id ON public.un_partial_stated_event_stream USING btree (event_id);
+
+
+--
+-- Name: un_partial_stated_room_stream_room_id; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX un_partial_stated_room_stream_room_id ON public.un_partial_stated_room_stream USING btree (room_id);
 
 
 --
@@ -4684,6 +6521,20 @@ CREATE UNIQUE INDEX user_directory_search_user_idx ON public.user_directory_sear
 
 
 --
+-- Name: user_directory_stale_remote_users_next_try_by_server_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX user_directory_stale_remote_users_next_try_by_server_idx ON public.user_directory_stale_remote_users USING btree (user_server_name, next_try_at_ts);
+
+
+--
+-- Name: user_directory_stale_remote_users_next_try_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX user_directory_stale_remote_users_next_try_idx ON public.user_directory_stale_remote_users USING btree (next_try_at_ts, user_server_name);
+
+
+--
 -- Name: user_directory_user_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
@@ -4691,10 +6542,17 @@ CREATE UNIQUE INDEX user_directory_user_idx ON public.user_directory USING btree
 
 
 --
--- Name: user_filters_by_user_id_filter_id; Type: INDEX; Schema: public; Owner: synapse
+-- Name: user_external_ids_user_id_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX user_filters_by_user_id_filter_id ON public.user_filters USING btree (user_id, filter_id);
+CREATE INDEX user_external_ids_user_id_idx ON public.user_external_ids USING btree (user_id);
+
+
+--
+-- Name: user_filters_unique; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX user_filters_unique ON public.user_filters USING btree (user_id, filter_id);
 
 
 --
@@ -4719,10 +6577,24 @@ CREATE INDEX user_ips_last_seen_only ON public.user_ips USING btree (last_seen);
 
 
 --
--- Name: user_ips_user_ip; Type: INDEX; Schema: public; Owner: synapse
+-- Name: user_ips_user_token_ip_unique_index; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX user_ips_user_ip ON public.user_ips USING btree (user_id, access_token, ip);
+CREATE UNIQUE INDEX user_ips_user_token_ip_unique_index ON public.user_ips USING btree (user_id, access_token, ip);
+
+
+--
+-- Name: user_signature_stream_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX user_signature_stream_idx ON public.user_signature_stream USING btree (stream_id);
+
+
+--
+-- Name: user_threepid_id_server_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX user_threepid_id_server_idx ON public.user_threepid_id_server USING btree (user_id, medium, address, id_server);
 
 
 --
@@ -4747,46 +6619,410 @@ CREATE INDEX users_creation_ts ON public.users USING btree (creation_ts);
 
 
 --
--- Name: users_in_public_rooms_room_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: users_have_local_media; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX users_in_public_rooms_room_idx ON public.users_in_public_rooms USING btree (room_id);
-
-
---
--- Name: users_in_public_rooms_user_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE UNIQUE INDEX users_in_public_rooms_user_idx ON public.users_in_public_rooms USING btree (user_id);
+CREATE INDEX users_have_local_media ON public.local_media_repository USING btree (user_id, created_ts);
 
 
 --
--- Name: users_who_share_rooms_o_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: users_in_public_rooms_r_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE INDEX users_who_share_rooms_o_idx ON public.users_who_share_rooms USING btree (other_user_id);
-
-
---
--- Name: users_who_share_rooms_r_idx; Type: INDEX; Schema: public; Owner: synapse
---
-
-CREATE INDEX users_who_share_rooms_r_idx ON public.users_who_share_rooms USING btree (room_id);
+CREATE INDEX users_in_public_rooms_r_idx ON public.users_in_public_rooms USING btree (room_id);
 
 
 --
--- Name: users_who_share_rooms_u_idx; Type: INDEX; Schema: public; Owner: synapse
+-- Name: users_in_public_rooms_u_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-CREATE UNIQUE INDEX users_who_share_rooms_u_idx ON public.users_who_share_rooms USING btree (user_id, other_user_id);
+CREATE UNIQUE INDEX users_in_public_rooms_u_idx ON public.users_in_public_rooms USING btree (user_id, room_id);
 
 
 --
--- Name: application_services_regex application_services_regex_as_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+-- Name: users_who_share_private_rooms_o_idx; Type: INDEX; Schema: public; Owner: synapse
 --
 
-ALTER TABLE ONLY public.application_services_regex
-    ADD CONSTRAINT application_services_regex_as_id_fkey FOREIGN KEY (as_id) REFERENCES public.application_services(id);
+CREATE INDEX users_who_share_private_rooms_o_idx ON public.users_who_share_private_rooms USING btree (other_user_id);
+
+
+--
+-- Name: users_who_share_private_rooms_r_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE INDEX users_who_share_private_rooms_r_idx ON public.users_who_share_private_rooms USING btree (room_id);
+
+
+--
+-- Name: users_who_share_private_rooms_u_idx; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX users_who_share_private_rooms_u_idx ON public.users_who_share_private_rooms USING btree (user_id, other_user_id, room_id);
+
+
+--
+-- Name: worker_locks_key; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX worker_locks_key ON public.worker_locks USING btree (lock_name, lock_key);
+
+
+--
+-- Name: worker_read_write_locks_key; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX worker_read_write_locks_key ON public.worker_read_write_locks USING btree (lock_name, lock_key, token);
+
+
+--
+-- Name: worker_read_write_locks_mode_key; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX worker_read_write_locks_mode_key ON public.worker_read_write_locks_mode USING btree (lock_name, lock_key);
+
+
+--
+-- Name: worker_read_write_locks_mode_type; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX worker_read_write_locks_mode_type ON public.worker_read_write_locks_mode USING btree (lock_name, lock_key, write_lock);
+
+
+--
+-- Name: worker_read_write_locks_write; Type: INDEX; Schema: public; Owner: synapse
+--
+
+CREATE UNIQUE INDEX worker_read_write_locks_write ON public.worker_read_write_locks USING btree (lock_name, lock_key) WHERE write_lock;
+
+
+--
+-- Name: current_state_events check_event_stream_ordering; Type: TRIGGER; Schema: public; Owner: synapse
+--
+
+CREATE TRIGGER check_event_stream_ordering BEFORE INSERT OR UPDATE ON public.current_state_events FOR EACH ROW EXECUTE FUNCTION public.check_event_stream_ordering();
+
+
+--
+-- Name: local_current_membership check_event_stream_ordering; Type: TRIGGER; Schema: public; Owner: synapse
+--
+
+CREATE TRIGGER check_event_stream_ordering BEFORE INSERT OR UPDATE ON public.local_current_membership FOR EACH ROW EXECUTE FUNCTION public.check_event_stream_ordering();
+
+
+--
+-- Name: room_memberships check_event_stream_ordering; Type: TRIGGER; Schema: public; Owner: synapse
+--
+
+CREATE TRIGGER check_event_stream_ordering BEFORE INSERT OR UPDATE ON public.room_memberships FOR EACH ROW EXECUTE FUNCTION public.check_event_stream_ordering();
+
+
+--
+-- Name: partial_state_events check_partial_state_events; Type: TRIGGER; Schema: public; Owner: synapse
+--
+
+CREATE TRIGGER check_partial_state_events BEFORE INSERT OR UPDATE ON public.partial_state_events FOR EACH ROW EXECUTE FUNCTION public.check_partial_state_events();
+
+
+--
+-- Name: worker_read_write_locks delete_read_write_lock_parent_trigger; Type: TRIGGER; Schema: public; Owner: synapse
+--
+
+CREATE TRIGGER delete_read_write_lock_parent_trigger AFTER DELETE ON public.worker_read_write_locks FOR EACH ROW EXECUTE FUNCTION public.delete_read_write_lock_parent();
+
+
+--
+-- Name: worker_read_write_locks upsert_read_write_lock_parent_trigger; Type: TRIGGER; Schema: public; Owner: synapse
+--
+
+CREATE TRIGGER upsert_read_write_lock_parent_trigger BEFORE INSERT ON public.worker_read_write_locks FOR EACH ROW EXECUTE FUNCTION public.upsert_read_write_lock_parent();
+
+
+--
+-- Name: access_tokens access_tokens_refresh_token_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.access_tokens
+    ADD CONSTRAINT access_tokens_refresh_token_id_fkey FOREIGN KEY (refresh_token_id) REFERENCES public.refresh_tokens(id) ON DELETE CASCADE;
+
+
+--
+-- Name: destination_rooms destination_rooms_destination_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.destination_rooms
+    ADD CONSTRAINT destination_rooms_destination_fkey FOREIGN KEY (destination) REFERENCES public.destinations(destination);
+
+
+--
+-- Name: destination_rooms destination_rooms_room_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.destination_rooms
+    ADD CONSTRAINT destination_rooms_room_id_fkey FOREIGN KEY (room_id) REFERENCES public.rooms(room_id);
+
+
+--
+-- Name: event_edges event_edges_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.event_edges
+    ADD CONSTRAINT event_edges_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(event_id);
+
+
+--
+-- Name: event_failed_pull_attempts event_failed_pull_attempts_room_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.event_failed_pull_attempts
+    ADD CONSTRAINT event_failed_pull_attempts_room_id_fkey FOREIGN KEY (room_id) REFERENCES public.rooms(room_id);
+
+
+--
+-- Name: event_forward_extremities event_forward_extremities_event_id; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.event_forward_extremities
+    ADD CONSTRAINT event_forward_extremities_event_id FOREIGN KEY (event_id) REFERENCES public.events(event_id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: current_state_events event_stream_ordering_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.current_state_events
+    ADD CONSTRAINT event_stream_ordering_fkey FOREIGN KEY (event_stream_ordering) REFERENCES public.events(stream_ordering) NOT VALID;
+
+
+--
+-- Name: local_current_membership event_stream_ordering_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.local_current_membership
+    ADD CONSTRAINT event_stream_ordering_fkey FOREIGN KEY (event_stream_ordering) REFERENCES public.events(stream_ordering) NOT VALID;
+
+
+--
+-- Name: room_memberships event_stream_ordering_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.room_memberships
+    ADD CONSTRAINT event_stream_ordering_fkey FOREIGN KEY (event_stream_ordering) REFERENCES public.events(stream_ordering) NOT VALID;
+
+
+--
+-- Name: event_txn_id_device_id event_txn_id_device_id_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.event_txn_id_device_id
+    ADD CONSTRAINT event_txn_id_device_id_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(event_id) ON DELETE CASCADE;
+
+
+--
+-- Name: event_txn_id_device_id event_txn_id_device_id_user_id_device_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.event_txn_id_device_id
+    ADD CONSTRAINT event_txn_id_device_id_user_id_device_id_fkey FOREIGN KEY (user_id, device_id) REFERENCES public.devices(user_id, device_id) ON DELETE CASCADE;
+
+
+--
+-- Name: partial_state_events partial_state_events_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.partial_state_events
+    ADD CONSTRAINT partial_state_events_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(event_id);
+
+
+--
+-- Name: partial_state_events partial_state_events_room_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.partial_state_events
+    ADD CONSTRAINT partial_state_events_room_id_fkey FOREIGN KEY (room_id) REFERENCES public.partial_state_rooms(room_id);
+
+
+--
+-- Name: partial_state_rooms partial_state_rooms_join_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.partial_state_rooms
+    ADD CONSTRAINT partial_state_rooms_join_event_id_fkey FOREIGN KEY (join_event_id) REFERENCES public.events(event_id);
+
+
+--
+-- Name: partial_state_rooms partial_state_rooms_room_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.partial_state_rooms
+    ADD CONSTRAINT partial_state_rooms_room_id_fkey FOREIGN KEY (room_id) REFERENCES public.rooms(room_id);
+
+
+--
+-- Name: partial_state_rooms_servers partial_state_rooms_servers_room_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.partial_state_rooms_servers
+    ADD CONSTRAINT partial_state_rooms_servers_room_id_fkey FOREIGN KEY (room_id) REFERENCES public.partial_state_rooms(room_id);
+
+
+--
+-- Name: per_user_experimental_features per_user_experimental_features_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.per_user_experimental_features
+    ADD CONSTRAINT per_user_experimental_features_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(name);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_next_token_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_next_token_id_fkey FOREIGN KEY (next_token_id) REFERENCES public.refresh_tokens(id) ON DELETE CASCADE;
+
+
+--
+-- Name: sliding_sync_connection_positions sliding_sync_connection_positions_connection_key_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_connection_positions
+    ADD CONSTRAINT sliding_sync_connection_positions_connection_key_fkey FOREIGN KEY (connection_key) REFERENCES public.sliding_sync_connections(connection_key) ON DELETE CASCADE;
+
+
+--
+-- Name: sliding_sync_connection_required_state sliding_sync_connection_required_state_connection_key_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_connection_required_state
+    ADD CONSTRAINT sliding_sync_connection_required_state_connection_key_fkey FOREIGN KEY (connection_key) REFERENCES public.sliding_sync_connections(connection_key) ON DELETE CASCADE;
+
+
+--
+-- Name: sliding_sync_connection_room_configs sliding_sync_connection_room_configs_connection_position_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_connection_room_configs
+    ADD CONSTRAINT sliding_sync_connection_room_configs_connection_position_fkey FOREIGN KEY (connection_position) REFERENCES public.sliding_sync_connection_positions(connection_position) ON DELETE CASCADE;
+
+
+--
+-- Name: sliding_sync_connection_room_configs sliding_sync_connection_room_configs_required_state_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_connection_room_configs
+    ADD CONSTRAINT sliding_sync_connection_room_configs_required_state_id_fkey FOREIGN KEY (required_state_id) REFERENCES public.sliding_sync_connection_required_state(required_state_id);
+
+
+--
+-- Name: sliding_sync_connection_streams sliding_sync_connection_streams_connection_position_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_connection_streams
+    ADD CONSTRAINT sliding_sync_connection_streams_connection_position_fkey FOREIGN KEY (connection_position) REFERENCES public.sliding_sync_connection_positions(connection_position) ON DELETE CASCADE;
+
+
+--
+-- Name: sliding_sync_joined_rooms sliding_sync_joined_rooms_event_stream_ordering_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_joined_rooms
+    ADD CONSTRAINT sliding_sync_joined_rooms_event_stream_ordering_fkey FOREIGN KEY (event_stream_ordering) REFERENCES public.events(stream_ordering);
+
+
+--
+-- Name: sliding_sync_joined_rooms sliding_sync_joined_rooms_room_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_joined_rooms
+    ADD CONSTRAINT sliding_sync_joined_rooms_room_id_fkey FOREIGN KEY (room_id) REFERENCES public.rooms(room_id);
+
+
+--
+-- Name: sliding_sync_joined_rooms_to_recalculate sliding_sync_joined_rooms_to_recalculate_room_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_joined_rooms_to_recalculate
+    ADD CONSTRAINT sliding_sync_joined_rooms_to_recalculate_room_id_fkey FOREIGN KEY (room_id) REFERENCES public.rooms(room_id);
+
+
+--
+-- Name: sliding_sync_membership_snapshots sliding_sync_membership_snapshots_event_stream_ordering_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_membership_snapshots
+    ADD CONSTRAINT sliding_sync_membership_snapshots_event_stream_ordering_fkey FOREIGN KEY (event_stream_ordering) REFERENCES public.events(stream_ordering);
+
+
+--
+-- Name: sliding_sync_membership_snapshots sliding_sync_membership_snapshots_membership_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_membership_snapshots
+    ADD CONSTRAINT sliding_sync_membership_snapshots_membership_event_id_fkey FOREIGN KEY (membership_event_id) REFERENCES public.events(event_id);
+
+
+--
+-- Name: sliding_sync_membership_snapshots sliding_sync_membership_snapshots_room_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.sliding_sync_membership_snapshots
+    ADD CONSTRAINT sliding_sync_membership_snapshots_room_id_fkey FOREIGN KEY (room_id) REFERENCES public.rooms(room_id);
+
+
+--
+-- Name: ui_auth_sessions_credentials ui_auth_sessions_credentials_session_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.ui_auth_sessions_credentials
+    ADD CONSTRAINT ui_auth_sessions_credentials_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.ui_auth_sessions(session_id);
+
+
+--
+-- Name: ui_auth_sessions_ips ui_auth_sessions_ips_session_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.ui_auth_sessions_ips
+    ADD CONSTRAINT ui_auth_sessions_ips_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.ui_auth_sessions(session_id);
+
+
+--
+-- Name: un_partial_stated_event_stream un_partial_stated_event_stream_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.un_partial_stated_event_stream
+    ADD CONSTRAINT un_partial_stated_event_stream_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(event_id) ON DELETE CASCADE;
+
+
+--
+-- Name: un_partial_stated_room_stream un_partial_stated_room_stream_room_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.un_partial_stated_room_stream
+    ADD CONSTRAINT un_partial_stated_room_stream_room_id_fkey FOREIGN KEY (room_id) REFERENCES public.rooms(room_id) ON DELETE CASCADE;
+
+
+--
+-- Name: users_to_send_full_presence_to users_to_send_full_presence_to_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.users_to_send_full_presence_to
+    ADD CONSTRAINT users_to_send_full_presence_to_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(name);
+
+
+--
+-- Name: worker_read_write_locks worker_read_write_locks_lock_name_lock_key_write_lock_fkey; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.worker_read_write_locks
+    ADD CONSTRAINT worker_read_write_locks_lock_name_lock_key_write_lock_fkey FOREIGN KEY (lock_name, lock_key, write_lock) REFERENCES public.worker_read_write_locks_mode(lock_name, lock_key, write_lock);
+
+
+--
+-- Name: worker_read_write_locks_mode worker_read_write_locks_mode_foreign; Type: FK CONSTRAINT; Schema: public; Owner: synapse
+--
+
+ALTER TABLE ONLY public.worker_read_write_locks_mode
+    ADD CONSTRAINT worker_read_write_locks_mode_foreign FOREIGN KEY (lock_name, lock_key, token) REFERENCES public.worker_read_write_locks(lock_name, lock_key, token) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
