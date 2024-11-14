@@ -33,6 +33,7 @@ import async_timeout
 import networkx as nx
 from quart import Quart, abort, jsonify, request, send_from_directory, websocket
 from tenacity import retry, wait_fixed
+from tqdm import tqdm
 
 args = None
 stdout = subprocess.DEVNULL
@@ -200,24 +201,29 @@ class Mesh:
         with self.will_rewire():
             await server.start()
 
-        await self.safe_rewire()
+        await self.safe_auto_rewire()
         return server
 
-    def get_server(self, server_id):
+    def get_server(self, server_id) -> Server:
         return self.servers[server_id]
+
+    def get_started_servers(self) -> dict[int, Server]:
+        return {
+            i: self.servers[i] for i in self.servers if self.servers[i].ip is not None
+        }
 
     async def move_server(self, server, x, y):
         server.x = x
         server.y = y
-        await self.safe_rewire()
+        await self.safe_auto_rewire()
 
     async def remove_server(self, server):
         server.stop()
         self.graph.remove_node(server.id)
 
-        await self.safe_rewire()
+        await self.safe_auto_rewire()
 
-    async def safe_rewire(self):
+    async def safe_auto_rewire(self):
         if self._about_to_rewire_functions:
             app.logger.info("Skipping rewire as one will be triggered")
             return
@@ -236,30 +242,31 @@ class Mesh:
         self.rewiring = True
 
         try:
-            await self._rewire()
+            await self._auto_rewire()
         finally:
             self.rewiring = False
             if self.pending_rewire:
                 self.pending_rewire = False
-                await self.safe_rewire()
+                await self.safe_auto_rewire()
 
-    async def _rewire(self):
+    async def _auto_rewire(self):
         if self.cost_function == Mesh.COST_MIN_LATENCY:
             cost_function = self.get_latency
         elif self.cost_function == Mesh.COST_MAX_BANDWIDTH:
             cost_function = self.get_bandwidth_cost
 
-        started_servers = {
-            i: self.servers[i] for i in self.servers if self.servers[i].ip is not None
-        }
+        started_servers = self.get_started_servers()
 
-        # only try to wire servers which have started up and have IPs
+        # reset neighbours from the server's point of view.
+        # only for servers which have started up and have IPs
         for server in started_servers.values():
             # Uncomment if we want to recheck IP/mac addresses of the containers:
             # await server.update_network_info()
 
             server.reset_neighbours()
-            self.graph.remove_edges_from(list(self.graph.edges()))
+
+        # remove all edges from the underlying graph.
+        self.graph.remove_edges_from(list(self.graph.edges()))
 
         # first we wire anyone closer together than our thresholds
         for server1, server2 in combinations(started_servers.values(), 2):
@@ -286,7 +293,9 @@ class Mesh:
         self.path_costs = dict(nx.shortest_path_length(self.graph, weight="weight"))
 
         # app.logger.info("calculated shortest paths as %r", self.paths)
+        await self._do_rewire(started_servers, self.paths, self.path_costs)
 
+    async def _do_rewire(self, started_servers, paths, path_costs):
         c = list(combinations(started_servers, 2))
         app.logger.info("combinations %r", c)
 
@@ -299,12 +308,12 @@ class Mesh:
                             "dst": self.get_server(dest_id).toDict(),
                             "via": (
                                 self.get_server(
-                                    self.paths[source_id][dest_id][1]
+                                    paths[source_id][dest_id][1]
                                 ).toDict()
-                                if len(self.paths[source_id].get(dest_id, [])) > 1
+                                if len(paths[source_id].get(dest_id, [])) > 1
                                 else None
                             ),
-                            "cost": self.path_costs[source_id].get(dest_id),
+                            "cost": path_costs[source_id].get(dest_id),
                         }
                         for dest_id in started_servers
                         if source_id != dest_id
@@ -481,6 +490,70 @@ class Mesh:
             self._about_to_rewire_functions -= 1
 
 
+class DynMesh(Mesh):
+
+    def __init__(self, host_ip):
+        super().__init__(host_ip)
+        self.input_id2id = dict()
+
+    async def safe_auto_rewire(self):
+        # disable auto rewiring
+        pass
+
+    async def run(self, graphs: list[nx.Graph], period: float = 1.0) -> None:
+        # start a server for each node of the first graph.
+        tasks = []
+        input_ids = []
+        for n in graphs[0].nodes:
+            input_ids.append(n)
+            s = Server(0, 0) # FIXME: set position based on a layout instead of hardcoding?
+            tasks.append(self.add_server(s))
+        servers = await asyncio.gather(*tasks)
+        for i, s in enumerate(servers):
+            self.input_id2id[input_ids[i]] = s.id
+
+        # wire initial graph.
+        await self.rewire(graphs[0])
+
+        # sleep for two seconds to let Synapse startup on each server.
+        await asyncio.sleep(2)
+
+        # update wiring for each period of time.
+        for graph in graphs:
+            await asyncio.gather(
+                self.rewire(graph),
+                asyncio.sleep(period),
+            )
+
+
+    async def rewire(self, input_graph: nx.Graph):
+        print(input_graph)
+
+        started_servers = self.get_started_servers()
+
+        # reset neighbours from the server's point of view.
+        # only for servers which have started up and have IPs
+        for server in started_servers.values():
+            server.reset_neighbours()
+
+        # remove all edges from the underlying graph.
+        self.graph.remove_edges_from(list(self.graph.edges()))
+
+        for edge in input_graph.edges:
+            source_id = self.input_id2id[edge[0]]
+            target_id = self.input_id2id[edge[1]]
+            source_server = self.get_server(source_id)
+            target_server = self.get_server(target_id)
+            source_server.connect(target_server)
+            self.graph.add_edge(source_id, target_id, weight=1) # FIXME: set weight to something useful
+
+        self.paths = nx.shortest_path(self.graph, weight="weight")
+        self.path_costs = dict(nx.shortest_path_length(self.graph, weight="weight"))
+
+        # app.logger.info("calculated shortest paths as %r", self.paths)
+        await self._do_rewire(started_servers, self.paths, self.path_costs)
+
+
 mesh = Mesh("")
 
 
@@ -598,7 +671,7 @@ def on_get_defaults():
 async def on_put_defaults():
     json = await request.get_json()
     mesh.set_defaults(json)
-    await mesh.safe_rewire()
+    await mesh.safe_auto_rewire()
     return ""
 
 
@@ -606,7 +679,7 @@ async def on_put_defaults():
 async def on_put_link_health(server1, server2, type):
     json = await request.get_json()
     mesh.set_link_health(int(server1), int(server2), json)
-    await mesh.safe_rewire()
+    await mesh.safe_auto_rewire()
     return ""
 
 
@@ -615,7 +688,7 @@ async def on_delete_link_health(server1, server2, type):
     json = {}
     json[type] = None
     mesh.set_link_health(int(server1), int(server2), json)
-    await mesh.safe_rewire()
+    await mesh.safe_auto_rewire()
     return ""
 
 
@@ -623,9 +696,18 @@ def cleanup():
     subprocess.call(["./stop_clean_all.sh"])
 
 
-@app.before_first_request
-def setup():
-    atexit.register(cleanup)
+def parse_graphml(path: str) -> list[nx.Graph]:
+    graphs = []
+    for file in tqdm(sorted(os.scandir(path), key=lambda d: d.name)):
+        try:
+            graph: nx.Graph = nx.read_graphml(file)
+            graphs.append(graph)
+        except Exception as e:
+            tqdm.write(f'warning: skipping {file.name}: invalid file: {e}')
+            continue
+    if len(graphs) == 0:
+        raise Exception('no valid graphml files')
+    return graphs
 
 
 def main():
@@ -634,6 +716,11 @@ def main():
     parser = argparse.ArgumentParser(description="Synapse network simulator.")
     parser.add_argument(
         "host", help="The IP address of this host in the docker network."
+    )
+    parser.add_argument(
+        "graphmldir",
+        help="Directory containing input network GraphML files.",
+        nargs='?',
     )
     parser.add_argument(
         "--port",
@@ -687,7 +774,13 @@ def main():
         stdout = None
         stderr = None
 
-    app.run(host="0.0.0.0", port=args.port, debug=True)
+    atexit.register(cleanup)
+    loop = asyncio.new_event_loop()
+    if args.graphmldir != None:
+        dyn_mesh = DynMesh(args.host)
+        graphs = parse_graphml(args.graphmldir)
+        loop.create_task(dyn_mesh.run(graphs))
+    app.run(host="0.0.0.0", port=args.port, debug=True, loop=loop)
 
 
 if __name__ == "__main__":
