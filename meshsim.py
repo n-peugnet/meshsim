@@ -553,6 +553,7 @@ class DynMesh(Mesh):
             source_server = self.get_server(source_id)
             target_server = self.get_server(target_id)
             source_server.connect(target_server)
+            # Copy the edge to self.graph, using "weight" as the weight attribute
             self.graph.add_edge(source_id, target_id, weight=data.get("weight", 1))
 
         self.paths = nx.shortest_path(self.graph, weight="weight")
@@ -561,6 +562,27 @@ class DynMesh(Mesh):
         # app.logger.info("calculated shortest paths as %r", self.paths)
         await self._do_rewire(started_servers, self.paths, self.path_costs)
         await event_notif_queue.put({ "event_type": "update" })
+
+    def get_bandwidth(self, server1, server2):
+        """Returns the bandwidth, derivated from the weight attribute"""
+        if server1.id > server2.id:
+            tmp = server1
+            server1 = server2
+            server2 = tmp
+        data = self.graph.get_edge_data(server1.id, server2.id)
+        weight = data.get("weight", 1)
+        return max(self.min_bandwidth, int((1.1-weight) * self.bandwidth))
+
+    def get_latency(self, server1, server2):
+        """Returns the latency, derivated from the weight attribute"""
+        if server1.id > server2.id:
+            tmp = server1
+            server1 = server2
+            server2 = tmp
+        data = self.graph.get_edge_data(server1.id, server2.id)
+        weight = data.get("weight", 1)
+
+        return int(weight * self.max_latency) * (self.latency_scale / 100)
 
 
 mesh = Mesh("")
