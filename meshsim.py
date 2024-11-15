@@ -506,7 +506,7 @@ class DynMesh(Mesh):
         input_ids = []
         for n in graphs[0].nodes:
             input_ids.append(n)
-            s = Server(0, 0) # FIXME: set position based on a layout instead of hardcoding?
+            s = Server(0, 0) # TODO: set position based on a layout instead of hardcoding?
             tasks.append(self.add_server(s))
         servers = await asyncio.gather(*tasks)
         for i, s in enumerate(servers):
@@ -539,13 +539,13 @@ class DynMesh(Mesh):
         # remove all edges from the underlying graph.
         self.graph.remove_edges_from(list(self.graph.edges()))
 
-        for edge in input_graph.edges:
-            source_id = self.input_id2id[edge[0]]
-            target_id = self.input_id2id[edge[1]]
+        for source, target, data in input_graph.edges(data=True):
+            source_id = self.input_id2id[source]
+            target_id = self.input_id2id[target]
             source_server = self.get_server(source_id)
             target_server = self.get_server(target_id)
             source_server.connect(target_server)
-            self.graph.add_edge(source_id, target_id, weight=1) # FIXME: set weight to something useful
+            self.graph.add_edge(source_id, target_id, weight=data.get("weight", 1))
 
         self.paths = nx.shortest_path(self.graph, weight="weight")
         self.path_costs = dict(nx.shortest_path_length(self.graph, weight="weight"))
