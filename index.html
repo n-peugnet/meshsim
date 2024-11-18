@@ -696,6 +696,9 @@ body {
                 .select("circle")
                 .attr("stroke", () => c10(hashString(event_data.event)))
         }
+        else if (event_data.event_type == "update") {
+            fetchData()
+        }
     }
 </script>
 
