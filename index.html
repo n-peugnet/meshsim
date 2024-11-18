@@ -691,6 +691,9 @@ body {
                 .select("circle")
                 .attr("stroke", d => d.color)
         }
+        else if (event_data.event_type == "update") {
+            fetchData()
+        }
     }
 </script>
 
