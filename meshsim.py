@@ -512,6 +512,14 @@ class DynMesh(Mesh):
         for i, s in enumerate(servers):
             self.input_id2id[input_ids[i]] = s.id
 
+        # TODO: do not hardcode node positions and let webui arrange them
+        # based on a dynamic spring based layout algorithm.
+        positions = nx.circular_layout(self.graph, center=[300,300], scale=280)
+        for id, [x, y] in positions.items():
+                server = self.servers[id]
+                server.x = x
+                server.y = y
+
         # wire initial graph.
         await self.rewire(graphs[0])
 
