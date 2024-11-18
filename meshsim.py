@@ -552,6 +552,7 @@ class DynMesh(Mesh):
 
         # app.logger.info("calculated shortest paths as %r", self.paths)
         await self._do_rewire(started_servers, self.paths, self.path_costs)
+        await event_notif_queue.put({ "event_type": "update" })
 
 
 mesh = Mesh("")
@@ -777,9 +778,10 @@ def main():
     atexit.register(cleanup)
     loop = asyncio.new_event_loop()
     if args.graphmldir != None:
-        dyn_mesh = DynMesh(args.host)
+        global mesh
+        mesh = DynMesh(args.host)
         graphs = parse_graphml(args.graphmldir)
-        loop.create_task(dyn_mesh.run(graphs))
+        loop.create_task(mesh.run(graphs))
     app.run(host="0.0.0.0", port=args.port, debug=True, loop=loop)
 
 
