@@ -501,6 +501,12 @@ class DynMesh(Mesh):
         pass
 
     async def run(self, graphs: list[nx.Graph], period: float = 1.0) -> None:
+        try:
+            await self._run(graphs, period)
+        except asyncio.CancelledError:
+            pass
+
+    async def _run(self, graphs: list[nx.Graph], period: float = 1.0) -> None:
         # start a server for each node of the first graph.
         tasks = []
         input_ids = []
@@ -813,8 +819,18 @@ async def main():
         mesh = DynMesh(args.host)
         graphs = parse_graphml(args.graphmldir)
         tasks.append(asyncio.create_task(mesh.run(graphs)))
-    tasks.append(asyncio.create_task(app.run_task(host="0.0.0.0", port=args.port, debug=True)))
-    await asyncio.gather(*tasks)
+    # Quart's run_task catches Ctrl+C interrupt and exits cleanly
+    # so we can't use a TaskGroup to cancel the other tasks when
+    # it exits. Instead, we register a callback to cancel all the
+    # running tasks manually.
+    server_task = asyncio.create_task(app.run_task(host="0.0.0.0", port=args.port, debug=True))
+    tasks.append(server_task)
+    futures = asyncio.gather(*tasks)
+    server_task.add_done_callback(lambda _: futures.cancel())
+    try:
+        await futures
+    except asyncio.CancelledError:
+        pass
 
 
 if __name__ == "__main__":
