@@ -719,7 +719,7 @@ def parse_graphml(path: str) -> list[nx.Graph]:
     return graphs
 
 
-def main():
+async def main():
     global args
 
     parser = argparse.ArgumentParser(description="Synapse network simulator.")
@@ -784,14 +784,15 @@ def main():
         stderr = None
 
     atexit.register(cleanup)
-    loop = asyncio.new_event_loop()
+    tasks = []
     if args.graphmldir != None:
         global mesh
         mesh = DynMesh(args.host)
         graphs = parse_graphml(args.graphmldir)
-        loop.create_task(mesh.run(graphs))
-    app.run(host="0.0.0.0", port=args.port, debug=True, loop=loop)
+        tasks.append(asyncio.create_task(mesh.run(graphs)))
+    tasks.append(asyncio.create_task(app.run_task(host="0.0.0.0", port=args.port, debug=True)))
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
