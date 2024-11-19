@@ -561,7 +561,8 @@ class DynMesh(Mesh):
 
         # app.logger.info("calculated shortest paths as %r", self.paths)
         await self._do_rewire(started_servers, self.paths, self.path_costs)
-        await event_notif_queue.put({ "event_type": "update" })
+        if event_notif_queue:
+            await event_notif_queue.put({ "event_type": "update" })
 
     def get_bandwidth(self, server1, server2):
         """Returns the bandwidth, derivated from the weight attribute"""
