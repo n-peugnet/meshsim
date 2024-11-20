@@ -23,7 +23,6 @@ import json
 from flask import Flask, request, abort, jsonify, send_from_directory
 import subprocess
 import requests
-import psycopg2
 
 
 abspath = os.path.abspath(__file__)
@@ -36,12 +35,6 @@ app = Flask(__name__, static_url_path='')
 if (sys.version_info < (3, 5)):
     app.log.error("Needs Python 3.5 or later for subprocess.run()")
     exit
-
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "synapse")
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD")
-POSTGRES_DB = os.environ.get("POSTGRES_DB", "synapse")
-POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "db")
-POSTGRES_PORT = os.environ.get("POSTGRES_PORT", 5432)
 
 
 def run(cmd):
@@ -69,24 +62,15 @@ def set_routes():
     # ]
     routes = request.get_json()
 
-    dest_to_costs = {}
-
     result = ''
     result += run(["./clear_hs_routes.sh"])
     for route in routes:
-        server_id = route['dst']['id']
-        hostname = f"synapse{server_id}"
-
-        dest_to_costs[hostname] = route["cost"]
-
         if route['via'] is None:
             continue
 
         result += run([
             "./add_hs_route.sh", route['dst']['ip'], route['via']['ip'],
         ])
-
-    write_destination_health(dest_to_costs)
 
     return result
 
@@ -137,27 +121,5 @@ def set_network_health():
         )
 
     return result
-
-def write_destination_health(dest_to_cost):
-    conn = psycopg2.connect(
-        database=POSTGRES_DB,
-        user=POSTGRES_USER,
-        password=POSTGRES_PASSWORD,
-        host=POSTGRES_HOST,
-        port=POSTGRES_PORT,
-    )
-    with conn:
-        with conn.cursor() as txn:
-            txn.execute("TRUNCATE destination_health")
-            for destination, cost in dest_to_cost.items():
-                txn.execute(
-                    "INSERT INTO destination_health VALUES (%s, %s)",
-                    (destination, cost),
-                )
-
-    try:
-        requests.get("http://localhost:8008/_matrix/client/r0/admin/server_health")
-    except Exception as e:
-        pass
 
 app.run(host="0.0.0.0", port=3000, debug=True)

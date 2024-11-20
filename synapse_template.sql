@@ -476,19 +476,6 @@ CREATE TABLE public.deleted_pushers (
 ALTER TABLE public.deleted_pushers OWNER TO synapse;
 
 --
--- Name: destination_health; Type: TABLE; Schema: public; Owner: synapse
--- This table is required by topologiser.py
---
-
-CREATE TABLE public.destination_health (
-    destination text NOT NULL,
-    cost double precision
-);
-
-
-ALTER TABLE public.destination_health OWNER TO synapse;
-
---
 -- Name: destination_rooms; Type: TABLE; Schema: public; Owner: synapse
 --
 
@@ -3212,14 +3199,6 @@ COPY public.deleted_pushers (stream_id, app_id, pushkey, user_id, instance_name)
 
 
 --
--- Data for Name: destination_health; Type: TABLE DATA; Schema: public; Owner: synapse
---
-
-COPY public.destination_health (destination, cost) FROM stdin;
-\.
-
-
---
 -- Data for Name: destination_rooms; Type: TABLE DATA; Schema: public; Owner: synapse
 --
 
@@ -4630,14 +4609,6 @@ ALTER TABLE ONLY public.delayed_events
 
 ALTER TABLE ONLY public.delayed_events_stream_pos
     ADD CONSTRAINT delayed_events_stream_pos_lock_key UNIQUE (lock);
-
-
---
--- Name: destination_health destination_health_pkey; Type: CONSTRAINT; Schema: public; Owner: synapse
---
-
-ALTER TABLE ONLY public.destination_health
-    ADD CONSTRAINT destination_health_pkey PRIMARY KEY (destination);
 
 
 --
