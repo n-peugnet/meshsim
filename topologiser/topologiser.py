@@ -18,11 +18,8 @@
 # along with coap-proxy.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
-import sys
-import json
-from flask import Flask, request, abort, jsonify, send_from_directory
+from flask import Flask, request
 import subprocess
-import requests
 
 
 abspath = os.path.abspath(__file__)
@@ -30,11 +27,6 @@ dname = os.path.dirname(abspath)
 os.chdir(dname)
 
 app = Flask(__name__, static_url_path='')
-
-
-if (sys.version_info < (3, 5)):
-    app.log.error("Needs Python 3.5 or later for subprocess.run()")
-    exit
 
 
 def run(cmd):
