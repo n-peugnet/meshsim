@@ -18,6 +18,7 @@
 # along with coap-proxy.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
+from socket import AF_INET
 from flask import Flask, request
 import subprocess
 
@@ -43,6 +44,8 @@ def run(cmd):
         result += "\n<!!\n" + out.stderr
     return result
 
+def init():
+    run(["./clear_hs_routes.sh"])
 
 @app.route("/routes", methods=["PUT"])
 def set_routes():
@@ -55,14 +58,16 @@ def set_routes():
     routes = request.get_json()
 
     result = ''
-    result += run(["./clear_hs_routes.sh"])
     for route in routes:
         if route['via'] is None:
-            continue
+            result += run(["./del_hs_route.sh", route['dst']['ip']])
+        else:
+            result += run([
+                "./add_hs_route.sh", route['dst']['ip'], route['via']['ip'],
+            ])
 
-        result += run([
-            "./add_hs_route.sh", route['dst']['ip'], route['via']['ip'],
-        ])
+    # Print result
+    result += run(["ip", "route", "show"])
 
     return result
 
@@ -114,4 +119,5 @@ def set_network_health():
 
     return result
 
+init()
 app.run(host="0.0.0.0", port=3000, debug=True)

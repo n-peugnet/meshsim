@@ -3,5 +3,5 @@
 DST=$1
 VIA=$2
 
-ip ro add $VIA dev eth0
-ip ro add $DST via $VIA
+ip ro replace $VIA dev eth0
+ip ro replace $DST via $VIA
