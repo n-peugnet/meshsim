@@ -87,6 +87,7 @@ class Server(object):
         if code != 0:
             raise Exception("Failed to start HS")
         await self.update_network_info()
+        await(asyncio.sleep(3))
 
     async def update_network_info(self):
         proc = await asyncio.create_subprocess_exec(
