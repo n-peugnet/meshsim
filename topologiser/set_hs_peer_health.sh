@@ -18,42 +18,26 @@
 # along with coap-proxy.  If not, see <https://www.gnu.org/licenses/>.
 
 PEERID=$1
-M0=$2; M1=$3; M2=$4; M3=$5; M4=$6; M5=$7
-BW=$8
-DELAY=$9
-JITTER=${10}
+BW=$2
+DELAY=$3
+JITTER=${4}
 
-#      root 1: prio
-#           /|\
-#          / | \
-#         /  |  \
-#        /   |   \
-#      1:1  1:2  1:3
-#       |    |    |
-#      10:  20:   30:
-#      sfq  tbf   tbf
-#            |     |
-#           20:1  30:1
-#            |     |
-#           21:   31:
-#           delay delay
-#            |     |
-
-
-# our packets look like:
-# # tcpdump -i eth0  -vvve -xx -XX -n
-# 14:19:49.061214 02:42:ac:12:00:02 > 02:42:ac:12:00:03, ethertype IPv4 (0x0800), length 42: (tos 0x0, ttl 64, id 53241, offset 0, flags [DF], proto ICMP (1), length 28)
-#     172.18.0.2 > 172.18.0.3: ICMP echo request, id 179, seq 1, length 8
-# 	0x0000:  0242 ac12 0003 0242 ac12 0002 0800 4500  .B.....B......E.
-# 	0x0010:  001c cff9 4000 4001 12be ac12 0002 ac12  ....@.@.........
-# 	0x0020:  0003 0800 f74b 00b3 0001                 .....K....
-
-# so to filter on destination MAC:
-
-# 	0x0000:  0242 ac12 0003                0800
+#      root 1: drr
+#            |
+#      +-----+-----+---  ...  --+
+#      |     |     |            |
+#     1:1   1:2   1:3    ...   1:n
+#      |     |     |            |
+#     10:   20:   30:    ...   n0:
+#     sfq   tbf   tbf          tbf
+#            |     |            |
+#           20:1  30:1   ...   n0:1
+#            |     |            |
+#           21:   31:    ...   n1:
+#           delay delay        delay
+#            |     |            |
 
 # sample data:
-# M0=02; M1=42; M2=ac; M3=12; M4=00; M5=03
 # BW=300
 # DELAY=100
 # JITTER=10
@@ -84,14 +68,8 @@ BURST=$((`cat /sys/class/net/eth0/mtu` + 14 + 1))
 # otherwise we're going to always get 40s for free where everything works fine before suddenly the
 # rate limiting kicks in.  It might be better to just have a better TC module...
 
-tc qdisc add dev eth0 parent 1:$PEERID handle ${PEERID}0: tbf rate ${BW}bit burst $BURST limit 10000
-tc qdisc add dev eth0 parent ${PEERID}0:1 handle ${PEERID}1: netem delay ${DELAY}ms ${JITTER}ms 25%
-
-tc filter add dev eth0 protocol ip parent 1: \
-    u32 match u16 0x0800 0xFFFF at -2 \
-        match u32 0x$M2$M3$M4$M5 0xFFFFFFFF at -12 \
-        match u16 0x$M0$M1 0xFFFF at -14 \
-    flowid 1:$PEERID
+tc qdisc change dev eth0 parent 1:$PEERID handle ${PEERID}0: tbf rate ${BW}bit burst $BURST limit 10000
+tc qdisc change dev eth0 parent ${PEERID}0:1 handle ${PEERID}1: netem delay ${DELAY}ms ${JITTER}ms 25%
 
 # to diagnose:
 #

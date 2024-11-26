@@ -25,6 +25,7 @@ import subprocess
 
 abspath = os.path.abspath(__file__)
 dname = os.path.dirname(abspath)
+peers = set()
 os.chdir(dname)
 
 app = Flask(__name__, static_url_path='')
@@ -45,7 +46,8 @@ def run(cmd):
     return result
 
 def init():
-    run(["./clear_hs_routes.sh"])
+    print(run(["./clear_hs_routes.sh"]))
+    print(run(["./clear_hs_peer_health.sh"]))
 
 @app.route("/routes", methods=["PUT"])
 def set_routes():
@@ -93,29 +95,35 @@ def set_network_health():
     # }
     json = request.get_json()
 
-    i = 2  # we start adding the queues from 1:2, as 1:1 is the default queue
-    flow_count = len(json['peers']) + len(json['clients']) + 1
-    if flow_count < 2:
-        flow_count = 2
-
     result = ''
-    result += run(
-        ["./clear_hs_peer_health.sh", str(flow_count)]
-    )
     for peer in json['peers']:
-        mac = peer['peer']['mac'].split(":")
-        result += run(
-            ["./set_hs_peer_health.sh", str(i)] +
-            mac +
-            [str(peer['bandwidth']), str(peer['latency']), str(peer['jitter'])]
-        )
-        i = i + 1
+        # we use the peer id + 1 to start adding the queues from 1:2,
+        # as 1:1 is the default queue
+        id = peer['peer']['id'] + 2
+        mac = peer['peer']['mac']
 
-    for client in json['clients']:
-        result += run(
-            ["./set_client_health.sh", str(i), str(client.get('source_port', 0))] +
-            [str(client['bandwidth']), str(client['latency']), str(client['jitter'])]
-        )
+        if id not in peers:
+            peers.add(id)
+            result += run([
+                "./add_hs_peer_health.sh", str(id), mac,
+                str(peer['bandwidth']), str(peer['latency']), str(peer['jitter']),
+            ])
+        else:
+            result += run([
+                "./set_hs_peer_health.sh", str(id),
+                str(peer['bandwidth']), str(peer['latency']), str(peer['jitter']),
+            ])
+
+    # Disable traffic control for clients for now.
+    # for client in json['clients']:
+    #     result += run(
+    #         ["./set_client_health.sh", str(i), str(client.get('source_port', 0))] +
+    #         [str(client['bandwidth']), str(client['latency']), str(client['jitter'])]
+    #     )
+
+    # Print result
+    result += run(["tc", "qdisc", "show", "dev", "eth0"])
+    result += run(["tc", "filter", "show", "dev", "eth0"])
 
     return result
 
