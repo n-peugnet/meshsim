@@ -35,8 +35,10 @@ from quart import Quart, abort, jsonify, request, send_from_directory, websocket
 from tenacity import retry, wait_fixed
 
 args = None
+stdout = subprocess.DEVNULL
+stderr = subprocess.DEVNULL
 
-dictConfig({"version": 1, "loggers": {"quart.app": {"level": "INFO"}}})
+dictConfig({"version": 1, "loggers": {"quart.app": {"level": "WARNING"}}})
 
 app = Quart(__name__)
 
@@ -81,7 +83,8 @@ class Server(object):
     async def start(self):
         global args
         proc = await asyncio.create_subprocess_exec(
-            "./start_hs.sh", str(self.id), args.host
+            "./start_hs.sh", str(self.id), args.host,
+            stdout=stdout, stderr=stderr,
         )
         code = await proc.wait()
         if code != 0:
@@ -152,6 +155,7 @@ class Server(object):
                     str(client["latency"]),
                     str(client["jitter"]),
                     stdout=asyncio.subprocess.PIPE,
+                    stderr=stderr,
                 )
                 stdout, _ = await proc.communicate()
                 app.logger.info(
@@ -707,6 +711,11 @@ def main():
         help="Debug option to make the CoAP proxy log the packets that are being sent/received",
         action="store_true",
     )
+    parser.add_argument(
+        "--debug",
+        help="Enable debug logging",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     host = args.host
@@ -721,6 +730,12 @@ def main():
 
     if args.proxy_dump_payloads:
         os.environ["PROXY_DUMP_PAYLOADS"] = "1"
+
+    if args.debug:
+        dictConfig({"version": 1, "loggers": {"quart.app": {"level": "INFO"}}})
+        global stdout, stderr
+        stdout = None
+        stderr = None
 
     subprocess.call(["./init_client_health_host.sh"])
     app.run(host="0.0.0.0", port=args.port, debug=True)
