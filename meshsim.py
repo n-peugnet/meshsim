@@ -106,7 +106,6 @@ class Server(object):
         stdout, _ = await proc.communicate()
         self.mac = stdout.decode().strip()
 
-    @retry(wait=wait_fixed(1))
     async def set_routes(self, routes):
         # [
         #   {
@@ -117,11 +116,15 @@ class Server(object):
         data = json.dumps(routes, indent=4)
         app.logger.info("setting routes for %d: %s", self.id, data)
 
-        r = await put("http://localhost:%d/routes" % (19000 + self.id), data)
+        try:
+            r = await put("http://localhost:%d/routes" % (19000 + self.id), data)
 
-        app.logger.info("Set route with result for %d: %s", self.id, r)
+            app.logger.info("Set route with result for %d: %s", self.id, r)
+        except asyncio.TimeoutError:
+            app.logger.warning("Set route for %d: timeout", self.id)
+        except Exception:
+            app.logger.exception("Set route for %d: unexpected error:", self.id)
 
-    @retry(wait=wait_fixed(1))
     async def set_network_health(self, health):
         # {
         #     peers: [
@@ -137,9 +140,14 @@ class Server(object):
         data = json.dumps(health, indent=4)
         app.logger.info("setting health for %d: %s", self.id, data)
 
-        r = await put("http://localhost:%d/health" % (19000 + self.id), data)
+        try:
+            r = await put("http://localhost:%d/health" % (19000 + self.id), data)
 
-        app.logger.info("with result for %d: %s", self.id, r)
+            app.logger.info("Set health with result for %d: %s", self.id, r)
+        except asyncio.TimeoutError:
+            app.logger.warning("Set health for %d: timeout", self.id)
+        except Exception:
+            app.logger.exception("Set health for %d: unexpected error:", self.id)
 
     def stop(self):
         subprocess.call(["./stop_hs.sh", str(self.id)])
