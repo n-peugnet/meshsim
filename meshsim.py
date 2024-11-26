@@ -54,8 +54,8 @@ def setup():
     event_notif_queue = asyncio.Queue()
 
 
-async def put(url, data):
-    async with aiohttp.ClientSession() as session, async_timeout.timeout(30):
+async def put(url, data, timeout=1):
+    async with aiohttp.ClientSession() as session, async_timeout.timeout(timeout):
         async with session.put(
             url, data=data, headers={"Content-type": "application/json"}
         ) as response:
@@ -574,7 +574,7 @@ class DynMesh(Mesh):
         self.path_costs = dict(nx.shortest_path_length(self.graph, weight="weight"))
 
         # app.logger.info("calculated shortest paths as %r", self.paths)
-        await self._do_rewire(started_servers, self.paths, self.path_costs)
+        asyncio.create_task(self._do_rewire(started_servers, self.paths, self.path_costs))
         if event_notif_queue:
             await event_notif_queue.put({ "event_type": "update" })
 
