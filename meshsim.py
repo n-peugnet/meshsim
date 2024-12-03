@@ -795,6 +795,12 @@ async def main():
         action="store_true",
     )
     parser.add_argument(
+        "--period",
+        help="Delay in seconds between each graph of the graphml directory",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
         "--debug",
         help="Enable debug logging",
         action="store_true",
@@ -826,7 +832,7 @@ async def main():
         global mesh
         mesh = DynMesh(args.host)
         graphs = parse_graphml(args.graphmldir)
-        tasks.append(asyncio.create_task(mesh.run(graphs)))
+        tasks.append(asyncio.create_task(mesh.run(graphs, args.period)))
     # Quart's run_task catches Ctrl+C interrupt and exits cleanly
     # so we can't use a TaskGroup to cancel the other tasks when
     # it exits. Instead, we register a callback to cancel all the
