@@ -742,9 +742,18 @@ def cleanup():
     subprocess.call(["./stop_clean_all.sh"])
 
 
-def parse_graphml(path: str) -> list[nx.Graph]:
+def parse_graphml(path: str, skip_str: str) -> list[nx.Graph]:
+    count_str, out_of_str = skip_str.split('/', 2)
+    count = int(count_str)
+    out_of = int(out_of_str)
+    threshold = out_of - count
+    paths = []
+    for (i, p) in enumerate(sorted(os.scandir(path), key=lambda d: d.name)):
+        if i % out_of >= threshold:
+            continue
+        paths.append(p)
     graphs = []
-    for file in tqdm(sorted(os.scandir(path), key=lambda d: d.name)):
+    for file in tqdm(paths):
         try:
             graph: nx.Graph = nx.read_graphml(file)
             graphs.append(graph)
@@ -801,6 +810,11 @@ async def main():
         default=1.0,
     )
     parser.add_argument(
+        "--skip",
+        help="Fraction od graphs to skip from the graphml directory (e.g. 3/4)",
+        default="0/2",
+    )
+    parser.add_argument(
         "--debug",
         help="Enable debug logging",
         action="store_true",
@@ -831,7 +845,7 @@ async def main():
     if args.graphmldir != None:
         global mesh
         mesh = DynMesh(args.host)
-        graphs = parse_graphml(args.graphmldir)
+        graphs = parse_graphml(args.graphmldir, args.skip)
         tasks.append(asyncio.create_task(mesh.run(graphs, args.period)))
     # Quart's run_task catches Ctrl+C interrupt and exits cleanly
     # so we can't use a TaskGroup to cancel the other tasks when
