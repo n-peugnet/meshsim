@@ -614,6 +614,16 @@ body {
         console.log("Received WS event", event_data);
 
         if (event_data.event_type == "sending") {
+            const color = c10(hashString(event_data.event))
+
+            // update the sender node's color.
+            let node = data.nodes.find(d=>d.name==event_data.path[0])
+            node.color = color
+            d3.selectAll(".node")
+                .data([node], d=>d.name)
+                .select("circle")
+                .attr("stroke", d => d.color)
+
             // animate a message through the network path with the right timings.
             const dest = event_data.path[event_data.path.length - 1];
             message = svg.append("g")
@@ -622,7 +632,7 @@ body {
 
             message.append("circle")
                 .attr("r", 4)
-                .attr("fill", c10(hashString(event_data.event)))
+                .attr("fill", color)
                 // .attr("stroke", c10(hashString(event_data.event)))
                 // .attr("stroke-opacity", 1)
                 // .attr("fill-opacity", 0)
