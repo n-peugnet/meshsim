@@ -76,7 +76,6 @@ docker run -d --name synapse$HSID \
 	-p $((19000 + HSID)):3000 \
 	-p $((20000 + HSID)):5683/udp \
 	-e SYNAPSE_LOG_HOST=$HOST_IP \
-	-e SYNAPSE_USE_PROXY=1 \
 	-e PROXY_DUMP_PAYLOADS=1 \
 	synapse
 

@@ -657,7 +657,7 @@ body {
                 message = message.transition()
                     // 2.5x is a fudge factor to slow the packets down to take delays due to HTTPS into account
                     // so the correlation between a packet being sent & received is more obvious.
-                    .duration(hop.datum().latency * 1)
+                    .duration(hop.datum().latency * 2)
                     .ease(d3.easeLinear)
                     .attrTween("transform", translateAlong(hop, backwards));
             }
