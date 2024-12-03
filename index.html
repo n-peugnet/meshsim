@@ -226,7 +226,7 @@ body {
 
         node.merge(nodeEnter)
             .attr("r", 6)
-            .attr("stroke", (d, i)=>c10(i))
+            .attr("stroke", (d)=>d.color)
             .attr("stroke-width", 2)
             .attr("fill", "#fff")
             .attr("id", (d)=>`node-${d.name}`)
@@ -488,6 +488,9 @@ body {
                 for (let i in data.nodes) {
                     new_data.nodes[i] = json.nodes[i] ? json.nodes[i] : data.nodes[i];
                 }
+                for (let i in json.nodes) {
+                    new_data.nodes[i].color = data.nodes[i] ? data.nodes[i].color : c10(i)
+                }
                 data = new_data;
                 lastNodeId = data.nodes.length;
 
@@ -650,6 +653,8 @@ body {
         }
         else if (event_data.event_type == "receive") {
             const target = parseInt(event_data.target.replace("synapse", ""));
+            const node = data.nodes.find(d=>d.name==target)
+            node.color = c10(hashString(event_data.event))
 
             // we should have already seen this message received; now delete it
             svg.select('#' + eventIdToMessageId(target, event_data.event)).remove();
@@ -671,9 +676,9 @@ body {
                 .remove()
 
             d3.selectAll(".node")
-                .data(data.nodes.filter(d=>d.name==target), d=>d.name)
+                .data([node], d=>d.name)
                 .select("circle")
-                .attr("stroke", () => c10(hashString(event_data.event)))
+                .attr("stroke", d => d.color)
         }
     }
 </script>
