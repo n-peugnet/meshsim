@@ -174,10 +174,10 @@ class Mesh:
         self.pending_rewire = False
 
         # global defaults
-        self.bandwidth = 512000
+        self.bandwidth = 5120000
         self.decay_bandwidth = True
         self.latency_scale = 100
-        self.max_latency = 300
+        self.max_latency = 100
         self.min_bandwidth = 0
         self.jitter = 0
         self.packet_loss = 0
