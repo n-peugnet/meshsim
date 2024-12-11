@@ -27,6 +27,7 @@ from contextlib import contextmanager
 from itertools import combinations
 from math import sqrt
 import sys
+import time
 
 import aiohttp
 import async_timeout
@@ -551,7 +552,7 @@ class DynMesh(Mesh):
 
 
     async def rewire(self, input_graph: nx.Graph):
-        print(input_graph)
+        app.logger.info(input_graph)
 
         started_servers = self.get_started_servers()
 
@@ -667,6 +668,7 @@ async def on_incoming_log():
         event_id = args["event_id"]
         origin = args["origin"]
         app.logger.info(f"Received {event_id}. {origin} -> {server}")
+        print(f"{time.monotonic_ns()}\t{server}\trecv\t{event_id}")
         await event_notif_queue.put(
             {
                 "event_type": "receive",
@@ -678,6 +680,7 @@ async def on_incoming_log():
     elif msg == "SendingPDU":
         event_id = args["event_id"]
         destinations = json.loads(args["destinations"])
+        print(f"{time.monotonic_ns()}\t{server}\tsend\t{event_id}")
         for destination in destinations:
             app.logger.info(f"{server} Sending {event_id}. {server} -> {destination}")
             await event_notif_queue.put(
