@@ -42,16 +42,7 @@ stderr = subprocess.DEVNULL
 dictConfig({"version": 1, "loggers": {"quart.app": {"level": "WARNING"}}})
 
 app = Quart(__name__)
-
-
-# We need to create this *after* start up so that it binds to correct event loop
-event_notif_queue = None
-
-
-@app.before_first_request
-def setup():
-    global event_notif_queue
-    event_notif_queue = asyncio.Queue()
+event_notif_queue = asyncio.Queue()
 
 
 async def put(url, data, timeout=1):
