@@ -94,14 +94,6 @@ def set_network_health():
     #             jitter: 20, # +/- 20ms - we apply 25% correlation on jitter
     #         }, ...
     #     ],
-    #     clients: [
-    #         {
-    #             source_port: 54312,
-    #             bandwidth: 300, # 300bps
-    #             latency: 200, # 200ms
-    #             jitter: 20, # +/- 20ms - we apply 25% correlation on jitter
-    #         }, ...
-    #     ]
     # }
     json = request.get_json()
 
@@ -113,13 +105,6 @@ def set_network_health():
             "./set_hs_peer_health.sh", str(id),
             str(peer['bandwidth']), str(peer['latency']), str(peer['jitter'])
         ])
-
-    # Disable client health for now.
-    # for client in json['clients']:
-    #     result += run(
-    #         ["./set_client_health.sh", str(i), str(client.get('source_port', 0))] +
-    #         [str(client['bandwidth']), str(client['latency']), str(client['jitter'])]
-    #     )
 
     # Print result
     result += run(["tc", "qdisc", "show"])

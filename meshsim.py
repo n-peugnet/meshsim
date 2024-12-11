@@ -132,35 +132,9 @@ class Server(object):
         #             loss: 0, # 0% packet loss
         #         }, ...
         #     ],
-        #     clients: [
-        #         {
-        #             source_port: 54312,
-        #             bandwidth: 300, # 300bps
-        #             latency: 200, # 200ms
-        #             jitter: 20, # +/- 20ms - we apply 25% correlation on jitter
-        #             loss: 0, # 0% packet loss
-        #         }, ...
-        #     ]
         # }
         data = json.dumps(health, indent=4)
         app.logger.info("setting health for %d: %s", self.id, data)
-
-        # only apply client health on the host side once (picking server 0 arbitrarily)
-        if self.id == 0:
-            for client in health.get("clients", []):
-                proc = await asyncio.create_subprocess_exec(
-                    "./set_client_health_host.sh",
-                    str(client["source_port"]),
-                    str(client["bandwidth"]),
-                    str(client["latency"]),
-                    str(client["jitter"]),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=stderr,
-                )
-                stdout, _ = await proc.communicate()
-                app.logger.info(
-                    "with host result for %d: %s", self.id, stdout.decode().strip()
-                )
 
         r = await put("http://localhost:%d/health" % (19000 + self.id), data)
 
@@ -208,11 +182,6 @@ class Mesh:
         self.jitter = 0
         self.packet_loss = 0
         self.cost_function = Mesh.COST_MIN_LATENCY
-
-        self.client_bandwidth = 512000
-        self.client_latency = 0
-        self.client_jitter = 0
-        self.client_loss = 0
 
         # link overrides
         self.overrides = {}
@@ -366,15 +335,6 @@ class Mesh:
                             }
                             for neighbour in self.get_server(i).neighbours
                         ],
-                        "clients": [
-                            {
-                                "source_port": 0,  # FIXME once we support multiple clients
-                                "bandwidth": self.client_bandwidth,
-                                "latency": self.client_latency,
-                                "jitter": self.client_jitter,
-                                "loss": self.client_loss,
-                            }
-                        ],
                     }
                 )
                 for i in started_servers
@@ -498,10 +458,6 @@ class Mesh:
             "packet_loss": self.packet_loss,
             "cost_function": self.cost_function,
             "latency_scale": self.latency_scale,
-            "client_latency": self.client_latency,
-            "client_bandwidth": self.client_bandwidth,
-            "client_jitter": self.client_jitter,
-            "client_loss": self.client_loss,
         }
 
     def set_defaults(self, defaults):
@@ -515,12 +471,6 @@ class Mesh:
         self.packet_loss = int(defaults.get("packet_loss", self.packet_loss))
         self.cost_function = defaults.get("cost_function", self.cost_function)
         self.latency_scale = int(defaults.get("latency_scale", self.jitter))
-        self.client_latency = int(defaults.get("client_latency", self.client_latency))
-        self.client_bandwidth = int(
-            defaults.get("client_bandwidth", self.client_bandwidth)
-        )
-        self.client_jitter = int(defaults.get("client_jitter", self.client_jitter))
-        self.client_loss = int(defaults.get("client_loss", self.client_loss))
 
     @contextmanager
     def will_rewire(self):
@@ -737,7 +687,6 @@ def main():
         stdout = None
         stderr = None
 
-    subprocess.call(["./init_client_health_host.sh"])
     app.run(host="0.0.0.0", port=args.port, debug=True)
 
 

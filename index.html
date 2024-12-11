@@ -127,21 +127,6 @@ body {
                 <input id="latency_scale" type="text">
             </div>
 
-            <hr/>
-
-            <div class="control">
-                <label for="client_latency">Client Latency (ms)</label>
-                <input id="client_latency" type="text">
-            </div>
-            <div class="control">
-                <label for="client_bandwidth">Client Bandwidth (bps)</label>
-                <input id="client_bandwidth" type="text">
-            </div>
-            <div class="control">
-                <label for="client_jitter">Client Jitter (%)</label>
-                <input id="client_jitter" type="text">
-            </div>
-
             <button onClick="applyDefaults()">Apply</button>
 
             <div id="local" style="display: none">
@@ -530,9 +515,6 @@ body {
                     'min_bandwidth',
                     'jitter',
                     'latency_scale',
-                    'client_latency',
-                    'client_bandwidth',
-                    'client_jitter',
                 ]) {
                     document.getElementById(i).value = json[i];
                 }
@@ -557,9 +539,6 @@ body {
                 jitter:          document.getElementById('jitter').value,
                 cost_function:   document.querySelector('input[name="cost_function"]:checked').value,
                 latency_scale:   document.getElementById('latency_scale').value,
-                client_latency:  document.getElementById('client_latency').value,
-                client_bandwidth:document.getElementById('client_bandwidth').value,
-                client_jitter:   document.getElementById('client_jitter').value,
             })
         }).then(r=>{
             // grab sanitised versions from the server
