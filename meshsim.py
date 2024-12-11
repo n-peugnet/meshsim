@@ -25,12 +25,14 @@ import os
 import subprocess
 from contextlib import contextmanager
 from itertools import combinations
-from logging.config import dictConfig
 from math import sqrt
+import sys
 
 import aiohttp
 import async_timeout
 import networkx as nx
+from hypercorn.asyncio import serve
+from hypercorn.config import Config as HyperConfig
 from quart import Quart, abort, jsonify, request, send_from_directory, websocket
 from tenacity import retry, wait_fixed
 from tqdm import tqdm
@@ -39,9 +41,18 @@ args = None
 stdout = subprocess.DEVNULL
 stderr = subprocess.DEVNULL
 
-dictConfig({"version": 1, "loggers": {"quart.app": {"level": "WARNING"}}})
+class App(Quart):
+    def run_simple_task( self, host: str = "0.0.0.0", port: int = 3000, debug: bool | None = None):
+        config = HyperConfig()
+        config.access_log_format = "%(h)s %(r)s %(s)s %(b)s %(D)s"
+        config.accesslog = "/dev/stderr"
+        config.bind = [f"{host}:{port}"]
+        if debug is not None:
+            self.debug = debug
+        config.errorlog = "/dev/stderr"
+        return serve(self, config)
 
-app = Quart(__name__)
+app = App(__name__)
 event_notif_queue = asyncio.Queue()
 
 
@@ -730,7 +741,7 @@ async def on_delete_link_health(server1, server2, type):
 
 
 def cleanup():
-    subprocess.call(["./stop_clean_all.sh"])
+    subprocess.call(["./stop_clean_all.sh"], stdout=stdout, stderr=stderr)
 
 
 def parse_graphml(path: str, skip_str: str) -> list[nx.Graph]:
@@ -826,10 +837,9 @@ async def main():
         os.environ["PROXY_DUMP_PAYLOADS"] = "1"
 
     if args.debug:
-        dictConfig({"version": 1, "loggers": {"quart.app": {"level": "INFO"}}})
         global stdout, stderr
-        stdout = None
-        stderr = None
+        stdout = sys.stderr
+        stderr = sys.stderr
 
     atexit.register(cleanup)
     tasks = []
@@ -842,7 +852,7 @@ async def main():
     # so we can't use a TaskGroup to cancel the other tasks when
     # it exits. Instead, we register a callback to cancel all the
     # running tasks manually.
-    server_task = asyncio.create_task(app.run_task(host="0.0.0.0", port=args.port, debug=True))
+    server_task = asyncio.create_task(app.run_simple_task(port=args.port, debug=args.debug))
     tasks.append(server_task)
     futures = asyncio.gather(*tasks)
     server_task.add_done_callback(lambda _: futures.cancel())
