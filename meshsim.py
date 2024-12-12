@@ -512,7 +512,7 @@ class DynMesh(Mesh):
         pass
 
     async def setup(self, graph: nx.Graph):
-        print(f"{time.monotonic_ns()}\tmeshsim\tsetup\t")
+        print(f"{time.monotonic_ns()}\tmeshsim\tsetup\t", flush=True)
         # start a server for each node of the first graph.
         tasks = []
         input_ids = []
@@ -540,7 +540,7 @@ class DynMesh(Mesh):
 
 
     async def run(self, graphs: list[nx.Graph], period: float = 1.0) -> None:
-        print(f"{time.monotonic_ns()}\tmeshsim\trun\t")
+        print(f"{time.monotonic_ns()}\tmeshsim\trun\t", flush=True)
         try:
             # update wiring for each period of time.
             for graph in graphs:
@@ -669,7 +669,7 @@ async def on_incoming_log():
         event_id = args["event_id"]
         origin = args["origin"]
         app.logger.info(f"Received {event_id}. {origin} -> {server}")
-        print(f"{time.monotonic_ns()}\t{server}\trecv\t{event_id}")
+        print(f"{time.monotonic_ns()}\t{server}\trecv\t{event_id}", flush=True)
         await event_notif_queue.put(
             {
                 "event_type": "receive",
@@ -681,7 +681,7 @@ async def on_incoming_log():
     elif msg == "SendingPDU":
         event_id = args["event_id"]
         destinations = json.loads(args["destinations"])
-        print(f"{time.monotonic_ns()}\t{server}\tsend\t{event_id}")
+        print(f"{time.monotonic_ns()}\t{server}\tsend\t{event_id}", flush=True)
         for destination in destinations:
             app.logger.info(f"{server} Sending {event_id}. {server} -> {destination}")
             await event_notif_queue.put(
