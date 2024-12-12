@@ -511,17 +511,12 @@ class DynMesh(Mesh):
         # disable auto rewiring
         pass
 
-    async def run(self, graphs: list[nx.Graph], period: float = 1.0) -> None:
-        try:
-            await self._run(graphs, period)
-        except asyncio.CancelledError:
-            pass
-
-    async def _run(self, graphs: list[nx.Graph], period: float = 1.0) -> None:
+    async def setup(self, graph: nx.Graph):
+        print(f"{time.monotonic_ns()}\tmeshsim\tsetup\t")
         # start a server for each node of the first graph.
         tasks = []
         input_ids = []
-        for n in graphs[0].nodes:
+        for n in graph.nodes:
             input_ids.append(n)
             s = Server(0, 0) # TODO: set position based on a layout instead of hardcoding?
             tasks.append(self.add_server(s))
@@ -538,17 +533,23 @@ class DynMesh(Mesh):
                 server.y = y
 
         # wire initial graph.
-        await self.rewire(graphs[0])
+        await self.rewire(graph)
 
         # sleep for two seconds to let Synapse startup on each server.
         await asyncio.sleep(2)
 
-        # update wiring for each period of time.
-        for graph in graphs:
-            await asyncio.gather(
-                self.rewire(graph),
-                asyncio.sleep(period),
-            )
+
+    async def run(self, graphs: list[nx.Graph], period: float = 1.0) -> None:
+        print(f"{time.monotonic_ns()}\tmeshsim\trun\t")
+        try:
+            # update wiring for each period of time.
+            for graph in graphs:
+                await asyncio.gather(
+                        self.rewire(graph),
+                        asyncio.sleep(period),
+                        )
+        except asyncio.CancelledError:
+            pass
 
 
     async def rewire(self, input_graph: nx.Graph):
@@ -850,7 +851,8 @@ async def main():
         global mesh
         mesh = DynMesh(args.host)
         graphs = parse_graphml(args.graphmldir, args.skip)
-        tasks.append(asyncio.create_task(mesh.run(graphs, args.period)))
+        await asyncio.create_task(mesh.setup(graphs[0]))
+        tasks.append(asyncio.create_task(mesh.run(graphs[1:], args.period)))
     # Quart's run_task catches Ctrl+C interrupt and exits cleanly
     # so we can't use a TaskGroup to cancel the other tasks when
     # it exits. Instead, we register a callback to cancel all the
