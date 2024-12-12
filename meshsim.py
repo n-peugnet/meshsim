@@ -792,6 +792,18 @@ async def main():
         type=int,
     )
     parser.add_argument(
+        "--run",
+        "-r",
+        help="Command to run during the experiment",
+        type=str,
+    )
+    parser.add_argument(
+        "--setup",
+        "-s",
+        help="Command to run before running the experiment",
+        type=str,
+    )
+    parser.add_argument(
         "--jaeger",
         "-j",
         help="Enable Jaeger tracing in Synapse and CoAP proxy",
@@ -852,7 +864,13 @@ async def main():
         mesh = DynMesh(args.host)
         graphs = parse_graphml(args.graphmldir, args.skip)
         await asyncio.create_task(mesh.setup(graphs[0]))
+        if args.setup:
+            proc = await asyncio.create_subprocess_shell(args.setup, stdout=sys.stderr)
+            await proc.wait()
         tasks.append(asyncio.create_task(mesh.run(graphs[1:], args.period)))
+        if args.run:
+            proc = await asyncio.create_subprocess_shell(args.run, stdout=sys.stderr)
+            tasks.append(proc.wait())
     # Quart's run_task catches Ctrl+C interrupt and exits cleanly
     # so we can't use a TaskGroup to cancel the other tasks when
     # it exits. Instead, we register a callback to cancel all the
