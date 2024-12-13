@@ -26,6 +26,7 @@ import subprocess
 from contextlib import contextmanager
 from itertools import combinations
 from math import sqrt
+import signal
 import sys
 import time
 
@@ -828,6 +829,11 @@ async def main():
         default=1.0,
     )
     parser.add_argument(
+        "--timeout",
+        help="Delay in seconds before stopping the experiment",
+        type=float,
+    )
+    parser.add_argument(
         "--skip",
         help="Fraction od graphs to skip from the graphml directory (e.g. 3/4)",
         default="0/2",
@@ -859,6 +865,7 @@ async def main():
 
     atexit.register(cleanup)
     tasks = []
+    procs = []
     if args.graphmldir != None:
         global mesh
         mesh = DynMesh(args.host)
@@ -869,7 +876,9 @@ async def main():
             await proc.wait()
         tasks.append(asyncio.create_task(mesh.run(graphs[1:], args.period)))
         if args.run:
-            proc = await asyncio.create_subprocess_shell(args.run, stdout=sys.stderr)
+            # If pgid is zero, then the PGID of the process specified by pid is made the same as its process ID
+            proc = await asyncio.create_subprocess_shell(args.run, stdout=sys.stderr, process_group=0)
+            procs.append(proc)
             tasks.append(proc.wait())
     # Quart's run_task catches Ctrl+C interrupt and exits cleanly
     # so we can't use a TaskGroup to cancel the other tasks when
@@ -880,9 +889,16 @@ async def main():
     futures = asyncio.gather(*tasks)
     server_task.add_done_callback(lambda _: futures.cancel())
     try:
-        await futures
-    except asyncio.CancelledError:
+        if args.timeout:
+            await asyncio.wait_for(futures, args.timeout)
+        else:
+            await futures
+    except (asyncio.CancelledError, TimeoutError):
         pass
+
+    for proc in procs:
+        os.killpg(proc.pid, signal.SIGINT)
+        await proc.wait()
 
 
 if __name__ == "__main__":
