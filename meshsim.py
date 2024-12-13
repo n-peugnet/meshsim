@@ -19,6 +19,7 @@
 
 import argparse
 import asyncio
+from asyncio.subprocess import Process
 import atexit
 import json
 import os
@@ -772,6 +773,12 @@ def parse_graphml(path: str, skip_str: str) -> list[nx.Graph]:
     return graphs
 
 
+async def check_proc(proc: Process):
+    code = await proc.wait()
+    if code != 0:
+        raise Exception(f"subprocess exited with non-zero code: {code}")
+
+
 async def main():
     global args
 
@@ -873,13 +880,13 @@ async def main():
         await asyncio.create_task(mesh.setup(graphs[0]))
         if args.setup:
             proc = await asyncio.create_subprocess_shell(args.setup, stdout=sys.stderr)
-            await proc.wait()
+            await check_proc(proc)
         tasks.append(asyncio.create_task(mesh.run(graphs[1:], args.period)))
         if args.run:
             # If pgid is zero, then the PGID of the process specified by pid is made the same as its process ID
             proc = await asyncio.create_subprocess_shell(args.run, stdout=sys.stderr, process_group=0)
             procs.append(proc)
-            tasks.append(proc.wait())
+            tasks.append(check_proc(proc))
     # Quart's run_task catches Ctrl+C interrupt and exits cleanly
     # so we can't use a TaskGroup to cancel the other tasks when
     # it exits. Instead, we register a callback to cancel all the
