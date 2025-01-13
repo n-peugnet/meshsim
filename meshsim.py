@@ -686,15 +686,18 @@ async def on_incoming_log():
         print(f"{time.monotonic_ns()}\t{server}\tsend\t{event_id}", flush=True)
         for destination in destinations:
             app.logger.info(f"{server} Sending {event_id}. {server} -> {destination}")
-            await event_notif_queue.put(
-                {
-                    "event_type": "sending",
-                    "source": server,
-                    "target": destination,
-                    "path": mesh.get_path(name_to_id(server), name_to_id(destination)),
-                    "event": event_id,
-                }
-            )
+            try:
+                await event_notif_queue.put(
+                    {
+                        "event_type": "sending",
+                        "source": server,
+                        "target": destination,
+                        "path": mesh.get_path(name_to_id(server), name_to_id(destination)),
+                        "event": event_id,
+                    }
+                )
+            except:
+                app.logger.warning(f"Fail to send notify for {event_id}. {server} -> {destination}")
     return ""
 
 
