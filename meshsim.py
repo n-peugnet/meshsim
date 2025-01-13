@@ -909,7 +909,10 @@ async def main():
         pass
 
     for proc in procs:
-        os.killpg(proc.pid, signal.SIGINT)
+        try:
+            os.killpg(proc.pid, signal.SIGINT)
+        except ProcessLookupError:
+            print(f"proc {proc.pid} already terminated", file=sys.stderr)
         await proc.wait()
 
 
