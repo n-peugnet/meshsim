@@ -884,6 +884,8 @@ async def main():
         if args.setup:
             proc = await asyncio.create_subprocess_shell(args.setup, stdout=sys.stderr)
             await check_proc(proc)
+            # Wait to make sure setup is complete.
+            await(asyncio.sleep(1))
         tasks.append(asyncio.create_task(mesh.run(graphs[1:], args.period)))
         if args.run:
             # If pgid is zero, then the PGID of the process specified by pid is made the same as its process ID
