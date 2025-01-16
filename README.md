@@ -29,7 +29,6 @@ https://matrix.org/blog/2019/03/12/breaking-the-100bps-barrier-with-matrix-meshs
 
  * Requires a HS with a Dockerfile which lets it be run in a Debianish container to support KSM.
  * Uses KSM to share memory between the server containers.
- * Uses a local postgres shared across all the servers as their DB for simplicity.
  * Uses Flask and NetworkX to model the network topology in python.
    * It puppets the dockerized HSes via `docker run` and talking HTTP to a `topologiser` daemon that runs on the container.
    * We deliberately use this rather than docker-compose or docker stack/swarm given the meshsim itself is acting as an orchestrator.
@@ -53,33 +52,9 @@ Now usable in general, but may be a bit fiddly to get up and running.
    * Your OS packages will probably be too old.
 
  * create a docker network: `docker network create --driver bridge mesh`. Later
-   we will need to know the gateway IP (so that the images can talk to postgres,
+   we will need to know the gateway IP (so that the images can talk to
    meshsim, etc on the host). On MacOS `host.docker.internal` will work,
    otherwise run `docker network inspect mesh` and find the Gateway IP.
-
- * Install postgres
-   * `createuser -P synapse` # password synapseftw
-   * edit postgresql.conf to ensure postgres is listening on an IP that docker
-     containers will be able to hit. Set `listen_addresses = '<bridge ip>,localhost'`,
-     although that will only work after step "create a docker network".
-     If you can't find the config file, have a look in `/var/lib/pgsql/data/`.
-   * edit pg_hba.conf to ensure connections from docker container IPs will be
-     allowed (e.g. by enabling `trust` for user `synapse`). Example:
-
-     ```
-     # Add the following to the end of the file
-     local   all             synapse                                 trust
-     host    all             all             YOUR_DOCKER_HOST_IP/16  trust
-     ```
-
-   * Recommended: It's worth making the user you plan to run meshsim a superuser
-     in postgres, such that commands do not need to be prefixed with `sudo -u postgres`.
-     You can do so with the following:
-
-     ```
-     sudo -u postgres createuser --superuser --no-password $USER
-     sudo -u postgres createdb $USER
-     ```
 
  * Optional: Enable KSM on your host so your synapses can deduplicate RAM
    as much as possible
@@ -134,12 +109,9 @@ Now usable in general, but may be a bit fiddly to get up and running.
    	-e SYNAPSE_REPORT_STATS=no \
    	-e SYNAPSE_ENABLE_REGISTRATION=yes \
    	-e SYNAPSE_LOG_LEVEL=INFO \
-   	-e POSTGRES_DB=synapse$HSID \
-   	-e POSTGRES_PASSWORD=synapseftw \
    	-p $((18000 + HSID)):8008 \
    	-p $((19000 + HSID)):3000 \
    	-p $((20000 + HSID)):5683/udp \
-   	-e POSTGRES_HOST=$HOST_IP \
    	-e SYNAPSE_LOG_HOST=$HOST_IP \
    	-e SYNAPSE_USE_PROXY=1 \
    	-e PROXY_DUMP_PAYLOADS=1 \
@@ -151,7 +123,7 @@ Now usable in general, but may be a bit fiddly to get up and running.
  * check you can start a synapse via `./start_hs.sh 1 $DOCKER_IP` with DOCEKR_IP being the docker network gateway IP.
     * If the template import fails with something about `en_GB`, make sure you have that locale generated. Replacing `en_GB` with `en_US` or whatever your locale is in `synapse_template.sql` is also sufficient.
  * check if it's running with `docker stats`
- * check the supervisor logs with `docker logs -f synapse1` and that it can talk to your postgres ok
+ * check the supervisor logs with `docker logs -f synapse1`
  * log into the container to poke around with `docker exec -it synapse1 /bin/bash`
     * Actual synapse logs are located at `/var/log/supervisor/synapse*`
 

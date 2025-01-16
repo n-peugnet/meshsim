@@ -45,25 +45,6 @@ HOST_IP=$2
 
 # docker run -d --name dendrite$HSID -e HSID monolith
 
-if ! dropdb --if-exists synapse${HSID} ; then
-	echo "Failed to drop database, bailing"
-	exit 1
-fi
-
-psql --variable="ON_ERROR_STOP=" -f synapse_template.sql > /dev/null
-createdb -O synapse synapse${HSID} -T synapse_template
-
-# shouldn't we put this in the template?
-psql synapse$HSID <<EOT
-insert into users(name, password_hash) values ('@matthew:synapse$HSID', '\$2b\$12\$oOZr9g6bPScmPrpJHv/uuu2piCg7kN8ia/BAlfW6wske/1kLf8kze');
-insert into access_tokens(id, user_id, token) values (123123, '@matthew:synapse$HSID', 'fake_token');
-insert into profiles(user_id, full_user_id) values ('matthew', '@matthew:synapse$HSID');
-EOT
-
-# insert into users(name, password_hash) values ('@amandine:synapse$HSID', '\$2b\$12\$oOZr9g6bPScmPrpJHv/uuu2piCg7kN8ia/BAlfW6wske/1kLf8kze');
-# insert into access_tokens(id, user_id, token) values (123123, '@amandine:synapse$HSID', 'fake_token');
-# insert into profiles(user_id, full_user_id) values ('amandine', '@matthew:synapse$HSID');
-
 # build our synapse via:
 # docker build -t synapse -f docker/Dockerfile .
 
@@ -91,12 +72,9 @@ docker run -d --name synapse$HSID \
 	-e SYNAPSE_REPORT_STATS=no \
 	-e SYNAPSE_ENABLE_REGISTRATION=yes \
 	-e SYNAPSE_LOG_LEVEL=INFO \
-	-e POSTGRES_DB=synapse$HSID \
-	-e POSTGRES_PASSWORD=synapseftw \
 	-p $((18000 + HSID)):8008 \
 	-p $((19000 + HSID)):3000 \
 	-p $((20000 + HSID)):5683/udp \
-	-e POSTGRES_HOST=$HOST_IP \
 	-e SYNAPSE_LOG_HOST=$HOST_IP \
 	-e SYNAPSE_USE_PROXY=1 \
 	-e PROXY_DUMP_PAYLOADS=1 \
