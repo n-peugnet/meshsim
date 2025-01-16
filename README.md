@@ -35,7 +35,6 @@ https://matrix.org/blog/2019/03/12/breaking-the-100bps-barrier-with-matrix-meshs
  * Uses D3 to visualise and control the network topology in browser.
  * Manually puppets the routing tables of the servers based on running dijkstra on the network topo
  * Manually puppets TC on the servers to cripple bandwidth, latency & jitter as desired.
-   * Rather than forcing docker to spin up multiple interfaces per host (which would require gutwrenching the docker's network namespaces), we instead cripple bandwidth on egress traffic per upstream router (as identified by its MAC).
 
 Now usable in general, but may be a bit fiddly to get up and running.
 
@@ -49,7 +48,6 @@ Now usable in general, but may be a bit fiddly to get up and running.
 
  * Install Docker from docker.com (needs API 1.38; API 1.2x is known not to work.).
    * Check the API with `docker version`.
-   * Your OS packages will probably be too old.
 
  * create a docker network: `docker network create --driver bridge mesh`. Later
    we will need to know the gateway IP (so that the images can talk to
