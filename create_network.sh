@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Copyright 2019 New Vector Ltd
 # Copyright 2025 Nicolas Peugnet <nicolas.peugnet@lip6.fr>
 #
 # This file is part of meshsim.
@@ -20,19 +19,13 @@
 
 if [ "$#" -ne 1 ]
 then
-  echo 'Usage: ./stop_clean_all.sh <NETWORK_ID>'
+  echo 'Usage: ./create_netork.sh <NETWORK_ID>'
   exit 1
 fi
 
+set -e
+
 NETWORK_ID=$1
 
-ids=$(docker container ls -f name=synapse$NETWORK_ID. -q -a)
-
-if [[ ! -z $ids ]]
-then
-	echo "stopping $ids"
-	docker stop -t 0 $ids
-	docker rm $ids
-fi
-
-docker network rm mesh$NETWORK_ID
+docker network create --driver bridge mesh$NETWORK_ID > /dev/null
+docker inspect mesh$NETWORK_ID -f '{{range.IPAM.Config}}{{.Gateway}}{{end}}' | head -n1

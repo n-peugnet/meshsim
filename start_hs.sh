@@ -17,16 +17,17 @@
 # You should have received a copy of the GNU General Public License
 # along with coap-proxy.  If not, see <https://www.gnu.org/licenses/>.
 
-if [ "$#" -ne 2 ]
+if [ "$#" -ne 3 ]
 then
-  echo 'Usage: ./start_hs.sh <HS_ID> <DOCKER_HOST_IP>'
+  echo 'Usage: ./start_hs.sh <NETWORK_ID> <HS_ID> <DOCKER_HOST_IP>'
   exit 1
 fi
 
 set -x
 
-HSID=$1
-HOST_IP=$2
+NETWORK_ID=$1
+HSID=$2
+HOST_IP=$3
 
 
 # for db in account device mediaapi syncapi roomserver serverkey federationsender publicroomsapi appservice naffka; do
@@ -64,18 +65,18 @@ HOST_IP=$2
 # ...or whatever our bridge is, as PMTU doesn't seem to be working
 # and otherwise we'll get locked out of the guest.
 
-docker run -d --name synapse$HSID \
+docker run -d --name synapse$NETWORK_ID.$HSID \
 	--privileged \
-	--network mesh \
+	--network mesh$NETWORK_ID \
 	--hostname synapse$HSID \
-	-e SYNAPSE_SERVER_NAME=synapse${HSID} \
+	-e SYNAPSE_SERVER_NAME=synapse$HSID \
 	-e SYNAPSE_REPORT_STATS=no \
 	-e SYNAPSE_ENABLE_REGISTRATION=yes \
 	-e SYNAPSE_LOG_LEVEL=INFO \
-	-p $((18000 + HSID)):8008 \
-	-p $((19000 + HSID)):3000 \
-	-p $((20000 + HSID)):5683/udp \
-	-e SYNAPSE_LOG_HOST=$HOST_IP \
+	-p $((18000 + HSID + NETWORK_ID * 100)):8008 \
+	-p $((19000 + HSID + NETWORK_ID * 100)):3000 \
+	-p $((20000 + HSID + NETWORK_ID * 100)):5683/udp \
+	-e SYNAPSE_LOG_HOST=$HOST_IP:$((3000 + NETWORK_ID * 100)) \
 	-e PROXY_DUMP_PAYLOADS=1 \
 	synapse
 

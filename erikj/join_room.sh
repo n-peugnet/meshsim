@@ -1,6 +1,7 @@
 #!/bin/bash
 
-END=$1
+ID=$1
+END=$2
 
 function join {
         port=$1
@@ -9,7 +10,7 @@ function join {
 }
 
 for i in $(seq 0 $END); do
-        port=$(expr 18000 + $i)
+        port=$(expr 18000 + $i + $ID \* 100)
         join $port
         # sleep 2
 done

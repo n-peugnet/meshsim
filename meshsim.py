@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 # Copyright 2019 New Vector Ltd
+# Copyright 2025 Nicolas Peugnet <nicolas.peugnet@lip6.fr>
 #
 # This file is part of meshsim.
 #
@@ -41,6 +42,8 @@ from tenacity import retry, wait_fixed
 from tqdm import tqdm
 
 args = None
+id = 0
+host = ""
 stdout = subprocess.DEVNULL
 stderr = subprocess.DEVNULL
 
@@ -89,7 +92,7 @@ class Server(object):
     async def start(self):
         global args
         proc = await asyncio.create_subprocess_exec(
-            "./start_hs.sh", str(self.id), args.host,
+            "./start_hs.sh", str(id), str(self.id), host,
             stdout=stdout, stderr=stderr,
         )
         code = await proc.wait()
@@ -100,13 +103,13 @@ class Server(object):
 
     async def update_network_info(self):
         proc = await asyncio.create_subprocess_exec(
-            "./get_hs_ip.sh", str(self.id), stdout=asyncio.subprocess.PIPE
+            "./get_hs_ip.sh", str(id), str(self.id), stdout=asyncio.subprocess.PIPE
         )
         stdout, _ = await proc.communicate()
         self.ip = stdout.decode().strip()
 
         proc = await asyncio.create_subprocess_exec(
-            "./get_hs_mac.sh", str(self.id), stdout=asyncio.subprocess.PIPE
+            "./get_hs_mac.sh", str(id), str(self.id), stdout=asyncio.subprocess.PIPE
         )
         stdout, _ = await proc.communicate()
         self.mac = stdout.decode().strip()
@@ -122,7 +125,7 @@ class Server(object):
         app.logger.info("setting routes for %d: %s", self.id, data)
 
         try:
-            r = await put("http://localhost:%d/routes" % (19000 + self.id), data)
+            r = await put("http://localhost:%d/routes" % (19000 + self.id + id*100), data)
 
             app.logger.info("Set route with result for %d: %s", self.id, r)
         except asyncio.TimeoutError:
@@ -146,7 +149,7 @@ class Server(object):
         app.logger.info("setting health for %d: %s", self.id, data)
 
         try:
-            r = await put("http://localhost:%d/health" % (19000 + self.id), data)
+            r = await put("http://localhost:%d/health" % (19000 + self.id + id*100), data)
 
             app.logger.info("Set health with result for %d: %s", self.id, r)
         except asyncio.TimeoutError:
@@ -750,7 +753,7 @@ async def on_delete_link_health(server1, server2, type):
 
 
 def cleanup():
-    subprocess.call(["./stop_clean_all.sh"], stdout=stdout, stderr=stderr)
+    subprocess.call(["./stop_clean_all.sh", str(id)], stdout=stdout, stderr=stderr)
 
 
 def parse_graphml(path: str, skip_str: str) -> list[nx.Graph]:
@@ -783,24 +786,18 @@ async def check_proc(proc: Process):
 
 
 async def main():
-    global args
+    global args, id, host
 
     parser = argparse.ArgumentParser(description="Synapse network simulator.")
     parser.add_argument(
-        "host", help="The IP address of this host in the docker network."
+        "id", help="The numerical ID to use for the docker network and the listeners ports [0-9].",
+        choices=range(10),
+        type=int,
     )
     parser.add_argument(
         "graphmldir",
         help="Directory containing input network GraphML files.",
         nargs='?',
-    )
-    parser.add_argument(
-        "--port",
-        "-p",
-        help="The port for meshsim to listen on",
-        nargs=1,
-        default=3000,
-        type=int,
     )
     parser.add_argument(
         "--run",
@@ -855,7 +852,8 @@ async def main():
     )
     args = parser.parse_args()
 
-    host = args.host
+    id = args.id
+    host = subprocess.check_output(["./create_network.sh", str(id)], stderr=sys.stderr, text=True).strip()
     os.environ["POSTGRES_HOST"] = host
     os.environ["SYNAPSE_LOG_HOST"] = host
 
@@ -878,7 +876,7 @@ async def main():
     procs = []
     if args.graphmldir != None:
         global mesh
-        mesh = DynMesh(args.host)
+        mesh = DynMesh(host)
         graphs = parse_graphml(args.graphmldir, args.skip)
         await asyncio.create_task(mesh.setup(graphs[0]))
         if args.setup:
@@ -896,7 +894,7 @@ async def main():
     # so we can't use a TaskGroup to cancel the other tasks when
     # it exits. Instead, we register a callback to cancel all the
     # running tasks manually.
-    server_task = asyncio.create_task(app.run_simple_task(port=args.port, debug=args.debug))
+    server_task = asyncio.create_task(app.run_simple_task(port=3000 + id*100, debug=args.debug))
     tasks.append(server_task)
     futures = asyncio.gather(*tasks)
     server_task.add_done_callback(lambda _: futures.cancel())
