@@ -2,7 +2,7 @@
 
 NUM_FLOWS=$1
 
-GW=`cat /tmp/gw`
+GW=$(ip -o rout show default | cut -d' ' -f 3)
 
 tc qdisc del dev eth0 root
 
