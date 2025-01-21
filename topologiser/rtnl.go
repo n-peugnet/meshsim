@@ -136,9 +136,9 @@ func findIPv4() (*net.IPNet, error) {
 // listIPv4Routes retrieves only the IPv4 routes from the main routing table.
 func listIPv4Routes() ([]rtnetlink.RouteMessage, error) {
 	req := &rtnetlink.RouteMessage{
-		Family:     unix.AF_INET,
-		Scope:      unix.RT_SCOPE_UNIVERSE,
-		Table:      unix.RT_TABLE_MAIN,
+		Family: unix.AF_INET,
+		Scope:  unix.RT_SCOPE_UNIVERSE,
+		Table:  unix.RT_TABLE_MAIN,
 	}
 	flags := netlink.Request | netlink.Dump
 	msgs, err := ipnl.Execute(req, unix.RTM_GETROUTE, flags)
