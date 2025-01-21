@@ -24,11 +24,11 @@ import (
 
 	"github.com/florianl/go-tc"
 	"github.com/jsimonetti/rtnetlink/v2"
+	"github.com/mdlayher/netlink"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	devName    = "wlp4s0"
 	linkFormat = "peer%d"
 	rootQdisc  = 0xFFFFFFFF
 	milisecond = 1_000_000
@@ -37,18 +37,10 @@ const (
 var (
 	ipnl = ipnlDial()
 	tcnl = tcnlDial()
-	dev  *net.Interface
+	dev  = defaultInterface()
 
 	latencyDefault int64 = 0
 )
-
-func init() {
-	var err error
-	dev, err = net.InterfaceByName(devName)
-	if err != nil {
-		panic("interface " + devName + ": " + err.Error())
-	}
-}
 
 // ipnlDial opens a connection to the rtnetlink socket for ip-like operations.
 func ipnlDial() *rtnetlink.Conn {
@@ -66,6 +58,20 @@ func tcnlDial() *tc.Tc {
 		panic("rtnetlink tc: " + err.Error())
 	}
 	return tcnl
+}
+
+// defaultInterface returns the first non-loopback interface found, or else panics.
+func defaultInterface() *net.Interface {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		panic("get interfaces: " + err.Error())
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback == 0 {
+			return &iface
+		}
+	}
+	panic("no valid interface found")
 }
 
 // findDefaultRoute tries to find the current default route.
@@ -102,6 +108,34 @@ func findIPv4() (*net.IPNet, error) {
 	return nil, errors.New("ipv4 not found")
 }
 
+// listIPv4Routes retrieves only the IPv4 routes from the main routing table,
+// for the given interface.
+func listIPv4Routes(iface *net.Interface) ([]rtnetlink.RouteMessage, error) {
+	req := &rtnetlink.RouteMessage{
+		Family:     unix.AF_INET,
+		Scope:      unix.RT_SCOPE_UNIVERSE,
+		Table:      unix.RT_TABLE_MAIN,
+		Attributes: rtnetlink.RouteAttributes{OutIface: uint32(iface.Index)},
+	}
+	flags := netlink.Request | netlink.Dump
+	msgs, err := ipnl.Execute(req, unix.RTM_GETROUTE, flags)
+	routes := make([]rtnetlink.RouteMessage, len(msgs))
+	for i := range msgs {
+		routes[i] = *msgs[i].(*rtnetlink.RouteMessage)
+	}
+	return routes, err
+}
+
+// filterUnicast returns only the unicast routes from the given ones.
+func filterUnicast(routes []rtnetlink.RouteMessage) (filtered []rtnetlink.RouteMessage) {
+	for _, r := range routes {
+		if r.Type == unix.RTN_UNICAST {
+			filtered = append(filtered, r)
+		}
+	}
+	return
+}
+
 // delRoutes deletes all the given routes, stopping at the first error.
 func delRoutes(routes []rtnetlink.RouteMessage) error {
 	for _, r := range routes {
@@ -130,7 +164,7 @@ func addRoutes(routes []rtnetlink.RouteMessage) error {
 
 // initRoutes prepares the routes of the container.
 func initRoutes() error {
-	routes, err := ipnl.Route.List()
+	routes, err := listIPv4Routes(dev)
 	if err != nil {
 		return fmt.Errorf("ip route list: %w", err)
 	}
@@ -144,7 +178,7 @@ func initRoutes() error {
 	}
 	prefix, _ := ipnet.Mask.Size()
 	network := ipnet.IP.Mask(ipnet.Mask)
-	if err := delRoutes(routes); err != nil {
+	if err := delRoutes(filterUnicast(routes)); err != nil {
 		return fmt.Errorf("flush routes: %w", err)
 	}
 	routes = []rtnetlink.RouteMessage{
@@ -179,9 +213,7 @@ func initRoutes() error {
 }
 
 // addPeerLink creates a new macvlan link with a netem qdisc for a given peer.
-//
-// It returns the created qdisc, to be able to easily modify it later.
-func addPeerLink(peerID int) (*tc.Object, error) {
+func addPeerLink(peerID int) error {
 	linkName := fmt.Sprintf(linkFormat, peerID)
 
 	// Create new macvlan link
@@ -195,13 +227,13 @@ func addPeerLink(peerID int) (*tc.Object, error) {
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ip link add: %w", err)
+		return fmt.Errorf("ip link add: %w", err)
 	}
 
 	// Set new link up
 	link, err := net.InterfaceByName(linkName)
 	if err != nil {
-		panic("interface " + devName + ": " + err.Error())
+		return fmt.Errorf("interface %s: %w", linkName, err)
 	}
 	err = ipnl.Link.Set(&rtnetlink.LinkMessage{
 		Index:  uint32(link.Index),
@@ -209,7 +241,7 @@ func addPeerLink(peerID int) (*tc.Object, error) {
 		Change: unix.IFF_UP,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ip link set up: %w", err)
+		return fmt.Errorf("ip link set up: %w", err)
 	}
 
 	// Add netem qdisc with no limitations
@@ -226,8 +258,8 @@ func addPeerLink(peerID int) (*tc.Object, error) {
 		},
 	}
 	if err := tcnl.Qdisc().Add(qdisc); err != nil {
-		return nil, fmt.Errorf("tc qdisc add: %w", err)
+		return fmt.Errorf("tc qdisc add: %w", err)
 	}
 
-	return qdisc, nil
+	return nil
 }

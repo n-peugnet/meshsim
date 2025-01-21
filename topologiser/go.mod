@@ -1,6 +1,6 @@
 module gitlab.lip6.fr/ie6/meshsim/topologiser
 
-go 1.18
+go 1.22
 
 require (
 	github.com/florianl/go-tc v0.4.4
