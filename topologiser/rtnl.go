@@ -146,16 +146,16 @@ func delRoutes(routes []rtnetlink.RouteMessage) error {
 	return nil
 }
 
-// addRoutes adds all the given routes, stopping at the first error.
+// setRoutes sets all the given routes, stopping at the first error.
 //
 // For each route, the attributes Family, Protocol and Table are overriden,
 // so is is useless to set them beforehand.
-func addRoutes(routes []rtnetlink.RouteMessage) error {
+func setRoutes(routes []rtnetlink.RouteMessage) error {
 	for _, r := range routes {
 		r.Family = unix.AF_INET
 		r.Protocol = unix.RTPROT_BOOT
 		r.Table = unix.RT_TABLE_MAIN
-		if err := ipnl.Route.Add(&r); err != nil {
+		if err := ipnl.Route.Replace(&r); err != nil {
 			return fmt.Errorf("add route %+v: %w", r, err)
 		}
 	}
@@ -206,7 +206,7 @@ func initRoutes() error {
 			},
 		},
 	}
-	if err := addRoutes(routes); err != nil {
+	if err := setRoutes(routes); err != nil {
 		return fmt.Errorf("add routes: %w", err)
 	}
 	return nil
@@ -262,4 +262,71 @@ func addPeerLink(peerID int) error {
 	}
 
 	return nil
+}
+
+// setPeerRoutes creates or replace the needed routes for the given peer.
+func setPeerRoutes(dst, via *Peer) error {
+	linkName := fmt.Sprintf(linkFormat, via.ID)
+	link, err := net.InterfaceByName(linkName)
+	if err != nil {
+		return fmt.Errorf("interface %s: %w", linkName, err)
+	}
+	routes := []rtnetlink.RouteMessage{
+		{ // Make sure there is a route to the gateway
+			Scope:     unix.RT_SCOPE_LINK,
+			Type:      unix.RTN_UNICAST,
+			DstLength: 32,
+			Attributes: rtnetlink.RouteAttributes{
+				Dst:      via.IP,
+				OutIface: uint32(link.Index),
+			},
+		},
+		{ // Set the route for this peer
+			Type: unix.RTN_UNICAST,
+			Attributes: rtnetlink.RouteAttributes{
+				Dst:     dst.IP,
+				Gateway: via.IP,
+			},
+		},
+	}
+	return setRoutes(routes)
+}
+
+// delPeerRoute deletes the route to the given peer.
+func delPeerRoute(dst *Peer) error {
+	routes := []rtnetlink.RouteMessage{{
+		Attributes: rtnetlink.RouteAttributes{Dst: dst.IP},
+	}}
+	return delRoutes(routes)
+}
+
+func changeQdisc(health Health) error {
+	linkName := fmt.Sprintf(linkFormat, health.Peer.ID)
+	link, err := net.InterfaceByName(linkName)
+	if err != nil {
+		return fmt.Errorf("interface %s: %w", linkName, err)
+	}
+	var (
+		bandwidth = uint64(health.Bandwidth)
+		latency   = int64(health.Latency)
+		jitter    = int64(health.Latency)
+	)
+	qdisc := tc.Object{
+		Msg: tc.Msg{
+			Ifindex: uint32(link.Index),
+			Parent:  rootQdisc,
+		},
+		Attribute: tc.Attribute{
+			Kind: "netem",
+			Netem: &tc.Netem{
+				Rate64:    &bandwidth,
+				Latency64: &latency,
+				Jitter64:  &jitter,
+				Corr: &tc.NetemCorr{
+					Delay: 25,
+				},
+			},
+		},
+	}
+	return tcnl.Qdisc().Change(&qdisc)
 }

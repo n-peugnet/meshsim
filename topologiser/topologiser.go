@@ -21,13 +21,14 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 )
 
 type Peer struct {
 	ID  int    `json:"id"`
-	IP  string `json:"ip"`
+	IP  net.IP `json:"ip"`
 	MAC string `json:"mac"`
 }
 
@@ -106,13 +107,18 @@ func handleRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, route := range routes {
 		if route.Via == nil {
-			// TODO: delete route
-		} else {
-			id := route.Via.ID
-			if !addPeerIfNew(w, id) {
+			if err := delPeerRoute(route.Dst); err != nil {
+				http.Error(w, "del peer route: "+err.Error(), 500)
 				return
 			}
-			// TODO: replace route
+		} else {
+			if !addPeerIfNew(w, route.Via.ID) {
+				return
+			}
+			if err := setPeerRoutes(route.Dst, route.Via); err != nil {
+				http.Error(w, "set peer route: "+err.Error(), 500)
+				return
+			}
 		}
 	}
 }
@@ -148,13 +154,16 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		if !addPeerIfNew(w, id) {
 			return
 		}
-		// TODO: change qdisc
+		if err := changeQdisc(peer); err != nil {
+			http.Error(w, "change qdisc: "+err.Error(), 500)
+			return
+		}
 	}
 }
 
 func main() {
 	if err := initRoutes(); err != nil {
-		log.Fatal("init routes: %v", err)
+		log.Fatalf("init routes: %v", err)
 	}
 
 	http.HandleFunc("PUT /routes", handleRoutes)
