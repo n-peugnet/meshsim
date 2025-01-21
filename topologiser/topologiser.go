@@ -121,6 +121,9 @@ func handleRoutes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if err := dumpRoutes(w); err != nil {
+		http.Error(w, "dump routes: "+err.Error(), 500)
+	}
 }
 
 // handleHealth sets the health of the links of the current node.
@@ -158,6 +161,9 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "change qdisc: "+err.Error(), 500)
 			return
 		}
+	}
+	if err := dumpQdiscs(w); err != nil {
+		http.Error(w, "dump qdiscs: "+err.Error(), 500)
 	}
 }
 

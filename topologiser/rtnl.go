@@ -20,9 +20,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"strings"
+	"sync"
 
 	"github.com/florianl/go-tc"
+	"github.com/florianl/go-tc/core"
 	"github.com/jsimonetti/rtnetlink/v2"
 	"github.com/mdlayher/netlink"
 	"golang.org/x/sys/unix"
@@ -39,6 +43,8 @@ var (
 	dev  = defaultInterface()
 
 	latencyDefault int64 = 0
+	knownDevs            = make(map[uint32]string)
+	knownDevsLock  sync.RWMutex
 )
 
 // ipnlDial opens a connection to the rtnetlink socket for ip-like operations.
@@ -60,17 +66,37 @@ func tcnlDial() *tc.Tc {
 }
 
 // defaultInterface returns the first non-loopback interface found that is up, or else panics.
+//
+// By the way, fill the knownDevs map with the listed interfaces.
 func defaultInterface() *net.Interface {
+	var def *net.Interface
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		panic("get interfaces: " + err.Error())
 	}
+	knownDevsLock.Lock()
+	defer knownDevsLock.Unlock()
 	for _, iface := range ifaces {
+		knownDevs[uint32(iface.Index)] = iface.Name
 		if iface.Flags&net.FlagLoopback == 0 && iface.Flags&net.FlagRunning != 0 {
-			return &iface
+			def = &iface
 		}
 	}
-	panic("no valid interface found")
+	if def == nil {
+		panic("no valid interface found")
+	}
+	return def
+}
+
+// ifaceName gets the name for given interface from known devices.
+func ifaceName(index uint32) string {
+	knownDevsLock.RLock()
+	defer knownDevsLock.RUnlock()
+	if name, ok := knownDevs[index]; ok {
+		return name
+	} else {
+		return fmt.Sprint(index)
+	}
 }
 
 // findDefaultRoute tries to find the current default route.
@@ -237,6 +263,9 @@ func addPeerLink(peerID int) error {
 	if err != nil {
 		return fmt.Errorf("interface %s: %w", linkName, err)
 	}
+	knownDevsLock.Lock()
+	knownDevs[uint32(link.Index)] = linkName
+	knownDevsLock.Unlock()
 	err = ipnl.Link.Set(&rtnetlink.LinkMessage{
 		Index:  uint32(link.Index),
 		Flags:  unix.IFF_UP,
@@ -336,4 +365,61 @@ func changeQdisc(health Health) error {
 		},
 	}
 	return tcnl.Qdisc().Change(&qdisc)
+}
+
+// dumpRoutes writes the content of the main routing table to w, with an output
+// similar to "ip route show".
+func dumpRoutes(w io.Writer) error {
+	routes, err := listIPv4Routes()
+	routes = filterUnicast(routes)
+	if err != nil {
+		return fmt.Errorf("list routes: %w", err)
+	}
+	buf := make([]byte, 0, len(routes)*64)
+	for _, r := range routes {
+		var parts []string
+		a := &r.Attributes
+		if a.Dst == nil {
+			parts = append(parts, "default")
+		} else {
+			parts = append(parts, a.Dst.String())
+		}
+		if a.Gateway != nil {
+			parts = append(parts, "via", a.Gateway.String())
+		}
+		parts = append(parts, "dev", ifaceName(a.OutIface))
+		buf = append(buf, []byte(strings.Join(parts, " "))...)
+		buf = append(buf, '\n')
+	}
+	_, err = w.Write(buf)
+	return err
+}
+
+// dumpRoutes writes the list of the current qdiscs to w, with an output similar
+// to "tc qdisc show".
+func dumpQdiscs(w io.Writer) error {
+	qdiscs, err := tcnl.Qdisc().Get()
+	if err != nil {
+		return fmt.Errorf("list routes: %w", err)
+	}
+	buf := make([]byte, 0, len(qdiscs)*64)
+	for _, q := range qdiscs {
+		var parts []string
+		parts = append(parts, "qdisc", q.Kind)
+		if q.Handle == tc.HandleRoot {
+			parts = append(parts, "0:")
+		} else {
+			maj, min := core.SplitHandle(q.Handle)
+			parts = append(parts, fmt.Sprintf("%d:%d", maj, min))
+		}
+		parts = append(parts, "dev", ifaceName(q.Ifindex))
+		switch q.Kind {
+		case "netem":
+			parts = append(parts, fmt.Sprintf("%+v", q.Netem.Qopt))
+		}
+		buf = append(buf, []byte(strings.Join(parts, " "))...)
+		buf = append(buf, '\n')
+	}
+	_, err = w.Write(buf)
+	return err
 }
