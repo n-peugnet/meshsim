@@ -76,7 +76,7 @@ func defaultInterface() *net.Interface {
 // findDefaultRoute tries to find the current default route.
 func findDefaultRoute(routes []rtnetlink.RouteMessage) (*rtnetlink.RouteMessage, error) {
 	for _, r := range routes {
-		if r.Attributes.Dst == nil {
+		if r.Attributes.Dst == nil && r.Attributes.OutIface == uint32(dev.Index) {
 			return &r, nil
 		}
 	}
@@ -107,14 +107,12 @@ func findIPv4() (*net.IPNet, error) {
 	return nil, errors.New("ipv4 not found")
 }
 
-// listIPv4Routes retrieves only the IPv4 routes from the main routing table,
-// for the given interface.
-func listIPv4Routes(iface *net.Interface) ([]rtnetlink.RouteMessage, error) {
+// listIPv4Routes retrieves only the IPv4 routes from the main routing table.
+func listIPv4Routes() ([]rtnetlink.RouteMessage, error) {
 	req := &rtnetlink.RouteMessage{
 		Family:     unix.AF_INET,
 		Scope:      unix.RT_SCOPE_UNIVERSE,
 		Table:      unix.RT_TABLE_MAIN,
-		Attributes: rtnetlink.RouteAttributes{OutIface: uint32(iface.Index)},
 	}
 	flags := netlink.Request | netlink.Dump
 	msgs, err := ipnl.Execute(req, unix.RTM_GETROUTE, flags)
@@ -168,7 +166,7 @@ func setRoutes(routes []rtnetlink.RouteMessage) error {
 
 // initRoutes prepares the routes of the container.
 func initRoutes() error {
-	routes, err := listIPv4Routes(dev)
+	routes, err := listIPv4Routes()
 	if err != nil {
 		return fmt.Errorf("ip route list: %w", err)
 	}
