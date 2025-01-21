@@ -136,11 +136,16 @@ func filterUnicast(routes []rtnetlink.RouteMessage) (filtered []rtnetlink.RouteM
 	return
 }
 
-// delRoutes deletes all the given routes, stopping at the first error.
+// delRoutes deletes all the given routes, stopping at the first error other than
+// "no such process", as it is the error returned when the route to delete does
+// not exist.
 func delRoutes(routes []rtnetlink.RouteMessage) error {
 	for _, r := range routes {
 		if err := ipnl.Route.Delete(&r); err != nil {
-			return fmt.Errorf("del route %+v: %w", r, err)
+			// Ignore "no such process" error
+			if !errors.Is(err, unix.ESRCH) {
+				return fmt.Errorf("del route %+v: %w: %#v", r, err, errors.Unwrap(err))
+			}
 		}
 	}
 	return nil
@@ -282,7 +287,8 @@ func setPeerRoutes(dst, via *Peer) error {
 			},
 		},
 		{ // Set the route for this peer
-			Type: unix.RTN_UNICAST,
+			Type:      unix.RTN_UNICAST,
+			DstLength: 32,
 			Attributes: rtnetlink.RouteAttributes{
 				Dst:     dst.IP,
 				Gateway: via.IP,
@@ -295,6 +301,8 @@ func setPeerRoutes(dst, via *Peer) error {
 // delPeerRoute deletes the route to the given peer.
 func delPeerRoute(dst *Peer) error {
 	routes := []rtnetlink.RouteMessage{{
+		Family:     unix.AF_INET,
+		DstLength:  32,
 		Attributes: rtnetlink.RouteAttributes{Dst: dst.IP},
 	}}
 	return delRoutes(routes)
