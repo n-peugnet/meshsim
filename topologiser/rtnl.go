@@ -60,14 +60,14 @@ func tcnlDial() *tc.Tc {
 	return tcnl
 }
 
-// defaultInterface returns the first non-loopback interface found, or else panics.
+// defaultInterface returns the first non-loopback interface found that is up, or else panics.
 func defaultInterface() *net.Interface {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		panic("get interfaces: " + err.Error())
 	}
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagLoopback == 0 {
+		if iface.Flags&net.FlagLoopback == 0 && iface.Flags&net.FlagRunning != 0 {
 			return &iface
 		}
 	}
