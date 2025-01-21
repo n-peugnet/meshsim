@@ -30,7 +30,6 @@ import (
 
 const (
 	linkFormat = "peer%d"
-	rootQdisc  = 0xFFFFFFFF
 	milisecond = 1_000_000
 )
 
@@ -253,7 +252,7 @@ func addPeerLink(peerID int) error {
 	qdisc := &tc.Object{
 		Msg: tc.Msg{
 			Ifindex: uint32(link.Index),
-			Parent:  rootQdisc,
+			Parent:  tc.HandleRoot,
 		},
 		Attribute: tc.Attribute{
 			Kind: "netem",
@@ -308,6 +307,8 @@ func delPeerRoute(dst *Peer) error {
 	return delRoutes(routes)
 }
 
+// changeQdisc changes the parameters of the interface's netem qdisc corresponding
+// to the given health status.
 func changeQdisc(health Health) error {
 	linkName := fmt.Sprintf(linkFormat, health.Peer.ID)
 	link, err := net.InterfaceByName(linkName)
@@ -322,7 +323,7 @@ func changeQdisc(health Health) error {
 	qdisc := tc.Object{
 		Msg: tc.Msg{
 			Ifindex: uint32(link.Index),
-			Parent:  rootQdisc,
+			Parent:  tc.HandleRoot,
 		},
 		Attribute: tc.Attribute{
 			Kind: "netem",
