@@ -344,8 +344,9 @@ func changeQdisc(health Health) error {
 	}
 	var (
 		bandwidth = uint64(health.Bandwidth)
-		latency   = int64(health.Latency)
-		jitter    = int64(health.Latency)
+		latency   = uint32(health.Latency * milisecond)
+		jitter    = uint32(health.Jitter * milisecond)
+		loss      = uint32(health.PacketLoss)
 	)
 	qdisc := tc.Object{
 		Msg: tc.Msg{
@@ -355,12 +356,16 @@ func changeQdisc(health Health) error {
 		Attribute: tc.Attribute{
 			Kind: "netem",
 			Netem: &tc.Netem{
-				Rate64:    &bandwidth,
-				Latency64: &latency,
-				Jitter64:  &jitter,
+				Qopt: tc.NetemQopt{
+					Latency: latency,
+					Jitter:  jitter,
+					Loss:    loss,
+				},
 				Corr: &tc.NetemCorr{
+					// We apply 25% correlation on jitter
 					Delay: 25,
 				},
+				Rate64: &bandwidth,
 			},
 		},
 	}
