@@ -77,7 +77,7 @@ func defaultInterface() *net.Interface {
 // findDefaultRoute tries to find the current default route.
 func findDefaultRoute(routes []rtnetlink.RouteMessage) (*rtnetlink.RouteMessage, error) {
 	for _, r := range routes {
-		if r.Family == unix.AF_INET && r.Attributes.Dst == nil && r.Attributes.OutIface == uint32(dev.Index) {
+		if r.Attributes.Dst == nil {
 			return &r, nil
 		}
 	}
