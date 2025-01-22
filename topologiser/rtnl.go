@@ -106,7 +106,7 @@ func findDefaultRoute(routes []rtnetlink.RouteMessage) (*rtnetlink.RouteMessage,
 			return &r, nil
 		}
 	}
-	return nil, errors.New("default route not found")
+	return nil, fmt.Errorf("default route not found for interface: %s", dev.Name)
 }
 
 // findGateway tries to find the gateway of the current default route.
