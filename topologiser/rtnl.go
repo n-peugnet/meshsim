@@ -21,9 +21,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/florianl/go-tc"
 	"github.com/florianl/go-tc/core"
@@ -432,10 +434,34 @@ func dumpQdiscs(w io.Writer) error {
 		parts = append(parts, "dev", ifaceName(q.Ifindex))
 		switch q.Kind {
 		case "netem":
-			parts = append(parts, fmt.Sprintf("%+v", q.Netem.Qopt))
+			parts = append(parts, attrsNetem(q.Netem)...)
 		}
 		buf = fmt.Appendln(buf, parts...)
 	}
 	_, err = w.Write(buf)
 	return err
+}
+
+func attrsNetem(netem *tc.Netem) []any {
+	var parts []any
+	parts = append(parts, "limit", netem.Qopt.Limit)
+	if netem.Latency64 != nil {
+		parts = append(parts, "delay", time.Duration(*netem.Latency64))
+	}
+	if netem.Jitter64 != nil {
+		parts = append(parts, "jitter", time.Duration(*netem.Jitter64))
+		if netem.Corr != nil && netem.Corr.Delay != 0 {
+			delay := (100 * float64(netem.Corr.Delay)) / math.MaxUint32
+			parts = append(parts, fmt.Sprintf("%.f%%", delay))
+		}
+	}
+	if netem.Rate != nil && netem.Rate.Rate != 0 {
+		var rate uint64 = uint64(netem.Rate.Rate)
+		if netem.Rate64 != nil {
+			rate = *netem.Rate64
+		}
+		// netem rate is in bytes
+		parts = append(parts, "rate", fmt.Sprintf("%dKb/s", rate*8/1000))
+	}
+	return parts
 }
