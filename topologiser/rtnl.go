@@ -149,16 +149,6 @@ func listIPv4Routes() ([]rtnetlink.RouteMessage, error) {
 	return routes, err
 }
 
-// filterUnicast returns only the unicast routes from the given ones.
-func filterUnicast(routes []rtnetlink.RouteMessage) (filtered []rtnetlink.RouteMessage) {
-	for _, r := range routes {
-		if r.Type == unix.RTN_UNICAST {
-			filtered = append(filtered, r)
-		}
-	}
-	return
-}
-
 // delRoutes deletes all the given routes, stopping at the first error other than
 // "no such process", as it is the error returned when the route to delete does
 // not exist.
@@ -206,7 +196,10 @@ func initRoutes() error {
 	}
 	prefix, _ := ipnet.Mask.Size()
 	network := ipnet.IP.Mask(ipnet.Mask)
-	if err := delRoutes(filterUnicast(routes)); err != nil {
+	routes = slices.DeleteFunc(routes, func(r rtnetlink.RouteMessage) bool {
+		return r.Type != unix.RTN_UNICAST
+	})
+	if err := delRoutes(routes); err != nil {
 		return fmt.Errorf("flush routes: %w", err)
 	}
 	routes = []rtnetlink.RouteMessage{
