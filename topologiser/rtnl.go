@@ -38,14 +38,22 @@ const (
 )
 
 var (
-	ipnl = ipnlDial()
-	tcnl = tcnlDial()
+	ipnl *rtnetlink.Conn
+	tcnl *tc.Tc
 	dev  = defaultInterface()
 
 	latencyDefault int64 = 0
 	knownDevs            = make(map[uint32]string)
 	knownDevsLock  sync.RWMutex
 )
+
+func init() {
+	if err := rtnetlink.RegisterDriver(&Macvlan{}); err != nil {
+		panic("register link driver macvlan: " + err.Error())
+	}
+	ipnl = ipnlDial()
+	tcnl = tcnlDial()
+}
 
 // ipnlDial opens a connection to the rtnetlink socket for ip-like operations.
 func ipnlDial() *rtnetlink.Conn {
@@ -244,6 +252,9 @@ func addPeerLink(peerID int) error {
 			Type: uint32(dev.Index),
 			Info: &rtnetlink.LinkInfo{
 				Kind: "macvlan",
+				Data: &Macvlan{
+					Mode: MacvlanModeBridge,
+				},
 			},
 		},
 	})
