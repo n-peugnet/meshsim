@@ -449,7 +449,7 @@ func attrsNetem(netem *tc.Netem) []any {
 	if netem.Latency64 != nil {
 		parts = append(parts, "delay", time.Duration(*netem.Latency64))
 	}
-	if netem.Jitter64 != nil {
+	if netem.Jitter64 != nil && *netem.Jitter64 != 0 {
 		parts = append(parts, "jitter", time.Duration(*netem.Jitter64))
 		if netem.Corr != nil && netem.Corr.Delay != 0 {
 			delay := (100 * float64(netem.Corr.Delay)) / math.MaxUint32
