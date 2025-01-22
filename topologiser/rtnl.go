@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
+	"slices"
 	"sync"
 
 	"github.com/florianl/go-tc"
@@ -376,25 +376,34 @@ func changeQdisc(health Health) error {
 // similar to "ip route show".
 func dumpRoutes(w io.Writer) error {
 	routes, err := listIPv4Routes()
-	routes = filterUnicast(routes)
+	routes = slices.DeleteFunc(routes, func(r rtnetlink.RouteMessage) bool {
+		return r.Type == unix.RTN_LOCAL || r.Type == unix.RTN_BROADCAST
+	})
 	if err != nil {
 		return fmt.Errorf("list routes: %w", err)
 	}
 	buf := make([]byte, 0, len(routes)*64)
+	buf = fmt.Appendln(buf, "routes:")
 	for _, r := range routes {
-		var parts []string
+		var parts []any
 		a := &r.Attributes
+		if a.OutIface == 0 {
+			buf = fmt.Appendf(buf, "blackhole %v/%d\n", a.Dst, r.DstLength)
+			continue
+		}
 		if a.Dst == nil {
 			parts = append(parts, "default")
 		} else {
-			parts = append(parts, a.Dst.String())
+			parts = append(parts, a.Dst)
 		}
 		if a.Gateway != nil {
-			parts = append(parts, "via", a.Gateway.String())
+			parts = append(parts, "via", a.Gateway)
 		}
 		parts = append(parts, "dev", ifaceName(a.OutIface))
-		buf = append(buf, []byte(strings.Join(parts, " "))...)
-		buf = append(buf, '\n')
+		if a.Src != nil {
+			parts = append(parts, "src", a.Src)
+		}
+		buf = fmt.Appendln(buf, parts...)
 	}
 	_, err = w.Write(buf)
 	return err
@@ -408,8 +417,9 @@ func dumpQdiscs(w io.Writer) error {
 		return fmt.Errorf("list routes: %w", err)
 	}
 	buf := make([]byte, 0, len(qdiscs)*64)
+	buf = fmt.Appendln(buf, "qdiscs:")
 	for _, q := range qdiscs {
-		var parts []string
+		var parts []any
 		parts = append(parts, "qdisc", q.Kind)
 		if q.Handle == tc.HandleRoot {
 			parts = append(parts, "0:")
@@ -422,8 +432,7 @@ func dumpQdiscs(w io.Writer) error {
 		case "netem":
 			parts = append(parts, fmt.Sprintf("%+v", q.Netem.Qopt))
 		}
-		buf = append(buf, []byte(strings.Join(parts, " "))...)
-		buf = append(buf, '\n')
+		buf = fmt.Appendln(buf, parts...)
 	}
 	_, err = w.Write(buf)
 	return err
