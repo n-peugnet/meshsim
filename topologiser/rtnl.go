@@ -42,9 +42,11 @@ var (
 	tcnl *tc.Tc
 	dev  = defaultInterface()
 
-	latencyDefault int64 = 0
-	knownDevs            = make(map[uint32]string)
-	knownDevsLock  sync.RWMutex
+	knownDevs     = make(map[uint32]string)
+	knownDevsLock sync.RWMutex
+	defaultQopt   = tc.NetemQopt{
+		Limit: 1000, // default used by iproute2
+	}
 )
 
 func init() {
@@ -286,10 +288,8 @@ func addPeerLink(peerID int) error {
 			Parent:  tc.HandleRoot,
 		},
 		Attribute: tc.Attribute{
-			Kind: "netem",
-			Netem: &tc.Netem{
-				Latency64: &latencyDefault,
-			},
+			Kind:  "netem",
+			Netem: &tc.Netem{Qopt: defaultQopt},
 		},
 	}
 	if err := tcnl.Qdisc().Add(qdisc); err != nil {
