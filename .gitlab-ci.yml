@@ -1,0 +1,29 @@
+image: golang
+
+test:
+  stage: test
+  before_script:
+    - cd topologiser
+  script:
+    - go build -v
+    - go test -v -coverprofile=c.out ./...
+    - |
+      cat c.out |
+      awk 'BEGIN {cov=0; stat=0;}
+           $3!="" { cov+=($3==1?$2:0); stat+=$2; }
+           END {printf("total coverage: %.2f%% of statements\n", (cov/stat)*100);}'
+    - go vet ./...
+    - go fmt ./... && git diff --exit-code --color
+  coverage: '/total coverage: \d+\.\d+?%/'
+
+deploy:
+  image: docker:20.10.16
+  stage: deploy
+  services:
+    - docker:20.10.16-dind
+  variables:
+    IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+    - docker build -t $IMAGE_TAG .
+    - docker push $IMAGE_TAG
