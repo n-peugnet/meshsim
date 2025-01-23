@@ -17,13 +17,14 @@ test:
   coverage: '/total coverage: \d+\.\d+?%/'
 
 deploy:
-  image: docker:20.10.16
+  image: docker:latest
   stage: deploy
   services:
-    - docker:20.10.16-dind
+    - docker:dind
   variables:
     IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+    IMAGE_PLATFORMS: linux/arm64/v8,linux/amd64
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
-    - docker build -t $IMAGE_TAG .
-    - docker push $IMAGE_TAG
+    - docker buildx create --name buildx-builder --use
+    - docker buildx build --push -f CIdockerfile --platform $IMAGE_PLATFORMS --tag $IMAGE_TAG .
