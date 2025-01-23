@@ -12,4 +12,4 @@ RUN CGO_ENABLED=0 go build -o /bin/topologiser
 # Copy only the binary in final image
 FROM scratch
 COPY --from=build /bin/topologiser /bin/topologiser
-CMD /bin/topologiser
+CMD ["/bin/topologiser"]
