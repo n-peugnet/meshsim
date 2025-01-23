@@ -174,5 +174,6 @@ func main() {
 
 	http.HandleFunc("PUT /routes", handleRoutes)
 	http.HandleFunc("PUT /health", handleHealth)
+	log.Println("launching server on http://0.0.0.0:3000")
 	log.Fatal(http.ListenAndServe(":3000", nil))
 }
