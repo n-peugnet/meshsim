@@ -42,9 +42,9 @@ const (
 var (
 	ipnl *rtnetlink.Conn
 	tcnl *tc.Tc
-	dev  = defaultInterface()
+	dev  *net.Interface
 
-	knownDevs     = make(map[uint32]string)
+	knownDevs     map[uint32]string
 	knownDevsLock sync.RWMutex
 	defaultQopt   = tc.NetemQopt{
 		Limit: 1000, // default used by iproute2
@@ -57,6 +57,8 @@ func init() {
 	}
 	ipnl = ipnlDial()
 	tcnl = tcnlDial()
+	dev = defaultInterface()
+	knownDevs = ifaceNames()
 }
 
 // ipnlDial opens a connection to the rtnetlink socket for ip-like operations.
@@ -77,27 +79,36 @@ func tcnlDial() *tc.Tc {
 	return tcnl
 }
 
-// defaultInterface returns the first non-loopback interface found that is up, or else panics.
-//
-// By the way, fill the knownDevs map with the listed interfaces.
+// defaultInterface returns the interface associated with the default route,
+// or else panics.
 func defaultInterface() *net.Interface {
-	var def *net.Interface
+	routes, err := listIPv4Routes()
+	if err != nil {
+		panic("detect interface: ip route list: " + err.Error())
+	}
+	def, err := findDefaultRoute(routes)
+	if err != nil {
+		panic("detect interface: find default route: " + err.Error())
+	}
+	iface, err := net.InterfaceByIndex(int(def.Attributes.OutIface))
+	if err != nil {
+		panic("detect interface: " + err.Error())
+	}
+	return iface
+}
+
+// ifaceNames returns a map associating the known interfaces index with their
+// name, or else panics.
+func ifaceNames() map[uint32]string {
+	devs := make(map[uint32]string)
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		panic("get interfaces: " + err.Error())
+		panic("get interface names: " + err.Error())
 	}
-	knownDevsLock.Lock()
-	defer knownDevsLock.Unlock()
 	for _, iface := range ifaces {
-		knownDevs[uint32(iface.Index)] = iface.Name
-		if iface.Flags&net.FlagLoopback == 0 && iface.Flags&net.FlagRunning != 0 {
-			def = &iface
-		}
+		devs[uint32(iface.Index)] = iface.Name
 	}
-	if def == nil {
-		panic("no valid interface found")
-	}
-	return def
+	return devs
 }
 
 // ifaceName gets the name for given interface from known devices.
@@ -114,11 +125,11 @@ func ifaceName(index uint32) string {
 // findDefaultRoute tries to find the current default route.
 func findDefaultRoute(routes []rtnetlink.RouteMessage) (*rtnetlink.RouteMessage, error) {
 	for _, r := range routes {
-		if r.Attributes.Dst == nil && r.Attributes.OutIface == uint32(dev.Index) {
+		if r.Attributes.Dst == nil {
 			return &r, nil
 		}
 	}
-	return nil, fmt.Errorf("default route not found for interface: %s", dev.Name)
+	return nil, fmt.Errorf("default route not found")
 }
 
 // findGateway tries to find the gateway of the current default route.
