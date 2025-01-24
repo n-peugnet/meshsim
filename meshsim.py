@@ -157,9 +157,6 @@ class Server(object):
         except Exception:
             app.logger.exception("Set health for %d: unexpected error:", self.id)
 
-    def stop(self):
-        subprocess.call(["./stop_hs.sh", str(self.id)])
-
     def distance(self, server2):
         return sqrt((server2.x - self.x) ** 2 + (server2.y - self.y) ** 2)
 
@@ -231,12 +228,6 @@ class Mesh:
     async def move_server(self, server, x, y):
         server.x = x
         server.y = y
-        await self.safe_auto_rewire()
-
-    async def remove_server(self, server):
-        server.stop()
-        self.graph.remove_node(server.id)
-
         await self.safe_auto_rewire()
 
     async def safe_auto_rewire(self):
