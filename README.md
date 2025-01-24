@@ -64,11 +64,6 @@ Now usable in general, but may be a bit fiddly to get up and running.
 
  * create a empty directory, e.g. `matrix-low-bandwidth`
 
- * check out meshsim
-   ```
-   matrix-low-bandwidth$ git clone https://github.com/n-peugnet/meshsim
-   ```
-
  * Build the (KSM-capable) docker image:
    * Clone `synapse` repo and checkout the `n-peugnet/low-bandwidth` branch (inside the `matrix-low-bandwidth` directory)
      ```
