@@ -48,7 +48,7 @@ type Health struct {
 
 var (
 	peers     = make(map[int]bool, 0)
-	peersLock sync.Mutex
+	peersLock sync.RWMutex
 )
 
 // addPeerIfNew checks if the peer has already been added, if not, it adds it
@@ -57,14 +57,20 @@ var (
 //
 // On error, it writes the error message to w and returns false.
 func addPeerIfNew(w http.ResponseWriter, id int) bool {
+	peersLock.RLock()
+	known := peers[id]
+	peersLock.RUnlock()
+	if known {
+		return true
+	}
 	peersLock.Lock()
 	defer peersLock.Unlock()
 	if !peers[id] {
-		peers[id] = true
 		if err := addPeerLink(id); err != nil {
 			http.Error(w, "add peer: "+err.Error(), 500)
 			return false
 		}
+		peers[id] = true
 	}
 	return true
 }
