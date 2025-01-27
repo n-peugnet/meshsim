@@ -360,29 +360,36 @@ func changeQdisc(health Health) error {
 		return fmt.Errorf("interface %s: %w", linkName, err)
 	}
 	var (
-		rate    = uint32(health.Bandwidth / 8) // netem expects bytes
+		netem   = &tc.Netem{}
+		rate    uint32
+		rate64  = uint64(health.Bandwidth / 8) // netem expects bytes
 		latency = int64(health.Latency * milisecond)
 		jitter  = int64(health.Jitter * milisecond)
 	)
-	qopt := defaultQopt
-	qopt.Loss = uint32(health.PacketLoss)
+	if rate64 > math.MaxUint32 {
+		netem.Rate64 = &rate64
+		rate = math.MaxUint32
+	} else {
+		rate = uint32(rate64)
+	}
+	netem.Rate = &tc.NetemRate{Rate: rate}
+	netem.Latency64 = &latency
+	netem.Jitter64 = &jitter
+	netem.Corr = &tc.NetemCorr{
+		// We apply 25% correlation on jitter
+		Delay: 25,
+	}
+	netem.Qopt = defaultQopt
+	netem.Qopt.Loss = uint32(health.PacketLoss)
+
 	qdisc := tc.Object{
 		Msg: tc.Msg{
 			Ifindex: uint32(link.Index),
 			Parent:  tc.HandleRoot,
 		},
 		Attribute: tc.Attribute{
-			Kind: "netem",
-			Netem: &tc.Netem{
-				Qopt: qopt,
-				Corr: &tc.NetemCorr{
-					// We apply 25% correlation on jitter
-					Delay: 25,
-				},
-				Rate:      &tc.NetemRate{Rate: rate},
-				Latency64: &latency,
-				Jitter64:  &jitter,
-			},
+			Kind:  "netem",
+			Netem: netem,
 		},
 	}
 	return tcnl.Qdisc().Change(&qdisc)
