@@ -56,6 +56,13 @@ Now usable in general.
 You can log into the individual containers as `docker exec -it synapse$NETWORK.$N /bin/bash` to traceroute, ping
 and generally see what see what's going on.
 
+#### Custom image
+
+It is possible to build and run a custom image for Meshsim, to do this, one can
+take inspiration from the [root `Dockerfile`](Dockerfile), build the image with
+a tag (e.g. `docker build --tag meshsim-custom .`), then edit the start_hs.sh
+script to run the desired image based on its tag.
+
 #### Step-by-step checks
 
 To verify that everythig is working, you can realise the following checks.
