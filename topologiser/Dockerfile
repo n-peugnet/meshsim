@@ -2,11 +2,11 @@ FROM golang AS build
 WORKDIR /src
 
 # Download Go modules
-COPY topologiser/go.mod topologiser/go.sum ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 # Build the binary
-COPY topologiser .
+COPY . .
 RUN CGO_ENABLED=0 go build -o /bin/topologiser
 
 # Copy only the binary in final image

@@ -22,8 +22,7 @@ deploy:
   services:
     - docker:dind
   variables:
-    IMAGE_TAG: $CI_REGISTRY_IMAGE:latest
-    IMAGE_PLATFORMS: linux/arm/v7,linux/arm64/v8,linux/386,linux/amd64
+    PLATFORMS: linux/arm/v7,linux/arm64/v8,linux/386,linux/amd64
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
       when: always
@@ -32,4 +31,4 @@ deploy:
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
     - docker buildx create --name buildx-builder --use
-    - docker buildx build --push -f CIdockerfile --platform $IMAGE_PLATFORMS --tag $IMAGE_TAG .
+    - docker buildx build --push -f topologiser/CI.Dockerfile --platform $PLATFORMS --tag $CI_REGISTRY_IMAGE/topologiser:latest topologiser
