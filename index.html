@@ -395,14 +395,14 @@ body {
 
     function getPrettyBw(bw) {
         f = 10;
-        if (bw > 1024*1024*1024) {
-            return Math.round((f * bw) / (1024*1024*1024))/f + "Gbps";
+        if (bw > 1_000_000_000) {
+            return Math.round((f * bw) / (1_000_000_000))/f + "Gbps";
         }
-        if (bw > 1024*1024) {
-            return Math.round((f * bw) / (1024*1024))/f + "Mbps";
+        if (bw > 1_000_000) {
+            return Math.round((f * bw) / (1_000_000))/f + "Mbps";
         }
-        if (bw > 1024) {
-            return Math.round((f * bw) / 1024)/f + "Kbps";
+        if (bw > 1000) {
+            return Math.round((f * bw) / 1000)/f + "kbps";
         }
         return bw + "bps";
     }
