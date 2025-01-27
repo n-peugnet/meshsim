@@ -479,8 +479,16 @@ func attrsNetem(netem *tc.Netem) []any {
 		if netem.Rate64 != nil {
 			rate = *netem.Rate64
 		}
-		// netem rate is in bytes
-		parts = append(parts, "rate", fmt.Sprintf("%dKb/s", rate*8/1000))
+		parts = append(parts, "rate")
+		// netem rate is in bytes, we display as bits with SI prefix
+		rate *= 8
+		if rate > 100_000_000_000 {
+			parts = append(parts, fmt.Sprintf("%dGb/s", rate/1_000_000_000))
+		} else if rate > 100_000_000 {
+			parts = append(parts, fmt.Sprintf("%dMb/s", rate/1_000_000))
+		} else {
+			parts = append(parts, fmt.Sprintf("%dkb/s", rate/1_000))
+		}
 	}
 	return parts
 }
