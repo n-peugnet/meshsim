@@ -92,7 +92,7 @@ class Server(object):
     async def start(self):
         global args
         proc = await asyncio.create_subprocess_exec(
-            "./start_hs.sh", str(id), str(self.id), host,
+            args.start, str(id), str(self.id), host,
             stdout=stdout, stderr=stderr,
         )
         code = await proc.wait()
@@ -789,6 +789,11 @@ async def main():
         "graphmldir",
         help="Directory containing input network GraphML files.",
         nargs='?',
+    )
+    parser.add_argument(
+        "--start",
+        help="Path og the command to run for starting up a new node.",
+        default="./start_hs.sh",
     )
     parser.add_argument(
         "--run",
