@@ -53,7 +53,7 @@ Now usable in general.
  * drag to move them around
  * => profit
 
-You can log into the individual containers as `docker exec -it synapse$NETWORK.$N /bin/bash` to traceroute, ping
+You can log into the individual containers as `docker exec -it node$NETWORK.$N /bin/bash` to traceroute, ping
 and generally see what see what's going on.
 
 #### Custom image
@@ -73,7 +73,7 @@ To verify that everythig is working, you can realise the following checks.
    otherwise run `docker network inspect mesh` and find the Gateway IP.
  * check you can start a node via `./start_hs.sh 0 1 $DOCKER_IP` with 0 as networkid, 1 as hsid and DOCKER_IP being the docker network gateway IP.
  * check if it's running with `docker stats`
- * log into the container to poke around with `docker exec -it synapse0.1 /bin/bash`
+ * log into the container to poke around with `docker exec -it node0.1 /bin/bash`
 
  * Check that the topologiser is listening at http://localhost:19001 (ports are 19000 + hsid + networkid*100)
     * Don't expect to navigate to this URL and see anything more than a 404. As long as *something* is listening at this port, things are set up correctly.

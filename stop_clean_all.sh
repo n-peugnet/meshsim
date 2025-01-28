@@ -26,7 +26,7 @@ fi
 
 NETWORK_ID=$1
 
-ids=$(docker container ls -f name=synapse$NETWORK_ID. -q -a)
+ids=$(docker container ls -f name=node$NETWORK_ID. -q -a)
 
 if [[ ! -z $ids ]]
 then

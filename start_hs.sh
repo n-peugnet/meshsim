@@ -29,9 +29,9 @@ NETWORK_ID=$1
 HSID=$2
 HOST_IP=$3
 
-docker run -d --name synapse$NETWORK_ID.$HSID \
+docker run -d --name node$NETWORK_ID.$HSID \
 	--privileged \
 	--network mesh$NETWORK_ID \
-	--hostname synapse$HSID \
+	--hostname node$HSID \
 	-p $((19000 + HSID + NETWORK_ID * 100)):3000 \
 	gitlab.lip6.fr:5050/ie6/meshsim:latest

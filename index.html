@@ -663,7 +663,7 @@ body {
             }
         }
         else if (event_data.event_type == "receive") {
-            const target = parseInt(event_data.target.replace("synapse", ""));
+            const target = parseInt(event_data.target.replace("node", ""));
             const node = data.nodes.find(d=>d.name==target)
             node.color = c10(hashString(event_data.event))
 

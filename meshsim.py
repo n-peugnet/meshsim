@@ -531,7 +531,7 @@ class DynMesh(Mesh):
         # wire initial graph.
         await self.rewire(graph)
 
-        # sleep for two seconds to let Synapse startup on each server.
+        # sleep for two seconds to let the processes start on the node.
         await asyncio.sleep(2)
 
 
@@ -653,7 +653,7 @@ async def on_position_server(server_id):
 
 
 def name_to_id(name):
-    return int(name.replace("synapse", ""))
+    return int(name.replace("node", ""))
 
 
 @app.route("/log", methods=["GET"])
@@ -779,7 +779,7 @@ async def check_proc(proc: Process):
 async def main():
     global args, id, host
 
-    parser = argparse.ArgumentParser(description="Synapse network simulator.")
+    parser = argparse.ArgumentParser(description="Mesh network simulator.")
     parser.add_argument(
         "id", help="The numerical ID to use for the docker network and the listeners ports [0-9].",
         choices=range(10),
@@ -808,24 +808,6 @@ async def main():
         type=str,
     )
     parser.add_argument(
-        "--jaeger",
-        "-j",
-        help="Enable Jaeger tracing in Synapse and CoAP proxy",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--no-proxy",
-        "-n",
-        help="Have Synapse talk directly to each other rather than via the CoAP proxy",
-        action="store_false",
-        dest="use_proxy",
-    )
-    parser.add_argument(
-        "--proxy-dump-payloads",
-        help="Debug option to make the CoAP proxy log the packets that are being sent/received",
-        action="store_true",
-    )
-    parser.add_argument(
         "--period",
         help="Delay in seconds between each graph of the graphml directory",
         type=float,
@@ -850,17 +832,6 @@ async def main():
 
     id = args.id
     host = subprocess.check_output(["./create_network.sh", str(id)], stderr=sys.stderr, text=True).strip()
-    os.environ["POSTGRES_HOST"] = host
-    os.environ["SYNAPSE_LOG_HOST"] = host
-
-    if args.jaeger:
-        os.environ["SYNAPSE_JAEGER_HOST"] = host
-
-    if args.use_proxy:
-        os.environ["SYNAPSE_USE_PROXY"] = "1"
-
-    if args.proxy_dump_payloads:
-        os.environ["PROXY_DUMP_PAYLOADS"] = "1"
 
     if args.debug:
         global stdout, stderr
