@@ -24,6 +24,7 @@ from asyncio.subprocess import Process
 import atexit
 import json
 import os
+from os import path
 import subprocess
 from contextlib import contextmanager
 from itertools import combinations
@@ -46,6 +47,7 @@ id = 0
 host = ""
 stdout = subprocess.DEVNULL
 stderr = subprocess.DEVNULL
+dir = path.dirname(path.abspath(__file__))
 
 class App(Quart):
     def run_simple_task( self, host: str = "0.0.0.0", port: int = 3000, debug: bool | None = None):
@@ -103,13 +105,13 @@ class Server(object):
 
     async def update_network_info(self):
         proc = await asyncio.create_subprocess_exec(
-            "./get_hs_ip.sh", str(id), str(self.id), stdout=asyncio.subprocess.PIPE
+            path.join(dir, "get_hs_ip.sh"), str(id), str(self.id), stdout=asyncio.subprocess.PIPE
         )
         stdout, _ = await proc.communicate()
         self.ip = stdout.decode().strip()
 
         proc = await asyncio.create_subprocess_exec(
-            "./get_hs_mac.sh", str(id), str(self.id), stdout=asyncio.subprocess.PIPE
+            path.join(dir, "get_hs_mac.sh"), str(id), str(self.id), stdout=asyncio.subprocess.PIPE
         )
         stdout, _ = await proc.communicate()
         self.mac = stdout.decode().strip()
@@ -605,12 +607,12 @@ mesh = Mesh("")
 
 @app.route("/")
 async def send_index():
-    return await send_from_directory("", "index.html")
+    return await send_from_directory(dir, "index.html")
 
 
 @app.route("/static/<path:filename>")
 async def send_static(filename):
-    return await send_from_directory("static/", filename)
+    return await send_from_directory(path.join(dir, "static"), filename)
 
 
 @app.route("/server", methods=["POST"])
@@ -744,7 +746,7 @@ async def on_delete_link_health(server1, server2, type):
 
 
 def cleanup():
-    subprocess.call(["./stop_clean_all.sh", str(id)], stdout=stdout, stderr=stderr)
+    subprocess.call([path.join(dir, "stop_clean_all.sh"), str(id)], stdout=stdout, stderr=stderr)
 
 
 def parse_graphml(path: str, skip_str: str) -> list[nx.Graph]:
@@ -793,7 +795,7 @@ async def main():
     parser.add_argument(
         "--start",
         help="Path og the command to run for starting up a new node.",
-        default="./start_hs.sh",
+        default=path.join(dir, "start_hs.sh"),
     )
     parser.add_argument(
         "--run",
@@ -831,7 +833,7 @@ async def main():
     args = parser.parse_args()
 
     id = args.id
-    host = subprocess.check_output(["./create_network.sh", str(id)], stderr=sys.stderr, text=True).strip()
+    host = subprocess.check_output([path.join(dir, "create_network.sh"), str(id)], stderr=sys.stderr, text=True).strip()
 
     if args.debug:
         global stdout, stderr
