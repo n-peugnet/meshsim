@@ -54,6 +54,7 @@ Now usable in general.
 
 You can log into the individual containers as `docker exec -it node$NETWORK.$N /bin/bash` to traceroute, ping
 and generally see what see what's going on.
+Inside a network, each node has the hostname `node$N`, which is automatically resolved.
 
 #### Custom image
 
@@ -77,7 +78,6 @@ To verify that everythig is working, you can realise the following checks.
     * other nodes of the same network can be reached by their hostname, for instance `node1` for the current node.
  * Check that the topologiser is listening at http://localhost:19001 (ports are 19000 + hsid + networkid*100)
     * Don't expect to navigate to this URL and see anything more than a 404. As long as *something* is listening at this port, things are set up correctly.
-
  * shut it down nicely `./stop_clean_all.sh 0`
 
 #### Limitations
