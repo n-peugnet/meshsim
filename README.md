@@ -36,9 +36,8 @@ Now usable in general.
 
  * Supported on macOS (with Docker-for-mac 18.06, not 2.0) & Linux
 
- * Meshsim requires an up-to-date python installation of at least python 3.6
-   * Check with `python --version` and/or `python3 --version`
-   * Install python dependencies with `pip install -r requirements.txt` or `pip3 install -r requirements.txt`
+ * Using [pipx](https://pipx.pypa.io/stable/) (`sudo apt install pipx`)
+   * Run: `pipx install git+https://gitlab.lip6.fr/ie6/meshsim.git`
 
  * Install Docker (needs API 1.38; API 1.2x is known not to work.).
    * On Debian and derivatives: `sudo apt install docker.io`
@@ -46,8 +45,8 @@ Now usable in general.
 
 #### Usage
 
- * run meshsim:  `./meshsim.py <NETWORK_ID>` where `<NETWORK_ID>` is the ID between 0 and 9 to use for the docker network.
-   Run `./meshsim.py -h` for more options.
+ * run meshsim:  `meshsim <NETWORK_ID>` where `<NETWORK_ID>` is the ID between 0 and 9 to use for the docker network.
+   Run `meshsim -h` for more options.
  * connect to meshsim at the indicated address.
  * click to create nodes
  * drag to move them around

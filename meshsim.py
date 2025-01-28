@@ -777,7 +777,7 @@ async def check_proc(proc: Process):
         raise Exception(f"subprocess exited with non-zero code: {code}")
 
 
-async def main():
+async def async_main():
     global args, id, host
 
     parser = argparse.ArgumentParser(description="Mesh network simulator.")
@@ -881,6 +881,8 @@ async def main():
             print(f"proc {proc.pid} already terminated", file=sys.stderr)
         await proc.wait()
 
+def main():
+    asyncio.run(async_main())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
