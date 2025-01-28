@@ -31,7 +31,6 @@ pytoml==0.1.20
 quart==0.16.3
 six==1.12.0
 sortedcontainers==2.1.0
-tenacity==8.2.2
 toml==0.10.0
 tqdm==4.67.0
 typing-extensions==3.7.4
