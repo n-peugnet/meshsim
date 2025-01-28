@@ -793,7 +793,7 @@ async def async_main():
     )
     parser.add_argument(
         "--start",
-        help="Path og the command to run for starting up a new node.",
+        help="Path of the command to run for starting up a new node.",
         default=path.join(dir, "start_hs.sh"),
     )
     parser.add_argument(

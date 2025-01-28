@@ -59,8 +59,9 @@ and generally see what see what's going on.
 
 It is possible to build and run a custom image for Meshsim, to do this, one can
 take inspiration from the [root `Dockerfile`](Dockerfile), build the image with
-a tag (e.g. `docker build --tag meshsim-custom .`), then edit the start_hs.sh
-script to run the desired image based on its tag.
+a tag (e.g. `docker build --tag meshsim-custom .`), then run meshsim with the
+`--start` option pointing to a custom start script (see [`start_hs.sh`](start_hs.sh)
+for reference).
 
 #### Step-by-step checks
 
