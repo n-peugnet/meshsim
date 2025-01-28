@@ -10,6 +10,7 @@ dependencies = [
   "async-timeout~=3.0",
   "Hypercorn~=0.17",
   "networkx~=3.2.0",
+  "numpy~=2.1",
   "quart~=0.16",
   "tqdm~=4.67",
 ]
