@@ -23,6 +23,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 )
 
@@ -50,6 +51,28 @@ var (
 	peers     = make(map[int]bool, 0)
 	peersLock sync.RWMutex
 )
+
+// writeFiles attempts to write the multiple given files, returning the first
+// error encountered.
+// A file is an array of two string, its path, and its content to write.
+func writeFiles(files [][2]string) error {
+	for _, f := range files {
+		if err := os.WriteFile(f[0], []byte(f[1]), 0644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// configureRouting configures the current node as a simulated mesh router.
+func configureRouting() error {
+	return writeFiles([][2]string{
+		// Turn this node into a router
+		{"/proc/sys/net/ipv4/conf/eth0/forwarding", "1"},
+		// Prevent sending ICMP redirects, as we hard wire the routes
+		{"/proc/sys/net/ipv4/conf/eth0/send_redirects", "0"},
+	})
+}
 
 // addPeerIfNew checks if the peer has already been added, if not, it adds it
 // to the known peers and creates a new virtual link that will be used to set
@@ -174,6 +197,9 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	if err := configureRouting(); err != nil {
+		log.Fatalf("configure routing: %v", err)
+	}
 	if err := initRoutes(); err != nil {
 		log.Fatalf("init routes: %v", err)
 	}
