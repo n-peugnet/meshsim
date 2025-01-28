@@ -74,7 +74,7 @@ To verify that everythig is working, you can realise the following checks.
  * check you can start a node via `./start_hs.sh 0 1 $DOCKER_IP` with 0 as networkid, 1 as hsid and DOCKER_IP being the docker network gateway IP.
  * check if it's running with `docker stats`
  * log into the container to poke around with `docker exec -it node0.1 /bin/bash`
-
+    * other nodes of the same network can be reached by their hostname, for instance `node1` for the current node.
  * Check that the topologiser is listening at http://localhost:19001 (ports are 19000 + hsid + networkid*100)
     * Don't expect to navigate to this URL and see anything more than a 404. As long as *something* is listening at this port, things are set up correctly.
 
@@ -86,7 +86,7 @@ Client-Server traffic shaping is not supported.
 
 #### License
 
-Copyright 2019 New Vector Ltd
+Copyright 2019 New Vector Ltd  
 Copyright 2024-2025 Nicolas Peugnet <nicolas.peugnet@lip6.fr>
 
 This file is part of meshsim.
