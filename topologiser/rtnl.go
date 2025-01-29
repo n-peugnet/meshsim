@@ -226,7 +226,7 @@ func initRoutes() error {
 		return fmt.Errorf("flush routes: %w", err)
 	}
 	routes = []rtnetlink.RouteMessage{
-		{ // Add a route to the gateway to override the blackhole
+		{ // Add a route to the gateway
 			Scope:     unix.RT_SCOPE_LINK,
 			Type:      unix.RTN_UNICAST,
 			DstLength: 32,
@@ -235,8 +235,8 @@ func initRoutes() error {
 				OutIface: uint32(dev.Index),
 			},
 		},
-		{ // By default, blackhole all the address of the current network
-			Type:      unix.RTN_BLACKHOLE,
+		{ // Make all the other address of the current network unreachable
+			Type:      unix.RTN_UNREACHABLE,
 			DstLength: uint8(prefix),
 			Attributes: rtnetlink.RouteAttributes{
 				Dst: network,
