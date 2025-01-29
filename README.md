@@ -38,6 +38,7 @@ Now usable in general.
 
  * Using [pipx](https://pipx.pypa.io/stable/) (`sudo apt install pipx`)
    * Run: `pipx install git+https://gitlab.lip6.fr/ie6/meshsim.git`
+   * Later, to upgrade: `pipx upgrade meshsim`
 
  * Install Docker (needs API 1.38; API 1.2x is known not to work.).
    * On Debian and derivatives: `sudo apt install docker.io`
