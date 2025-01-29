@@ -1,6 +1,6 @@
 [project]
+dynamic = ["version"]
 name = "meshsim"
-version = "0.0.1"
 description = "Simulates a mesh network with Docker."
 readme = "README.md"
 requires-python = ">=3.6"
@@ -19,8 +19,11 @@ dependencies = [
 meshsim = "meshsim.meshsim:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "versioningit"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "versioningit"
 
 [tool.hatch.build.targets.wheel]
 include = [
