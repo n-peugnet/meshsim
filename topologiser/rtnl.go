@@ -410,14 +410,23 @@ func dumpRoutes(w io.Writer) error {
 	for _, r := range routes {
 		var parts []any
 		a := &r.Attributes
-		if a.OutIface == 0 {
-			buf = fmt.Appendf(buf, "blackhole %v/%d\n", a.Dst, r.DstLength)
-			continue
+		switch r.Type {
+		case unix.RTN_UNICAST: // Do not print type
+		case unix.RTN_BLACKHOLE:
+			parts = append(parts, "blackhole")
+		case unix.RTN_UNREACHABLE:
+			parts = append(parts, "unreachable")
+		default:
+			parts = append(parts, fmt.Sprintf("type %v", r.Type))
 		}
-		if a.Dst == nil {
-			parts = append(parts, "default")
+		if a.Dst != nil {
+			if r.DstLength != 32 {
+				parts = append(parts, fmt.Sprintf("%v/%d", a.Dst, r.DstLength))
+			} else {
+				parts = append(parts, a.Dst)
+			}
 		} else {
-			parts = append(parts, a.Dst)
+			parts = append(parts, "default")
 		}
 		if a.Gateway != nil {
 			parts = append(parts, "via", a.Gateway)
