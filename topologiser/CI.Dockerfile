@@ -1,5 +1,5 @@
 # Dockerfile to use with buildx to cross-compile multi-arch images
-FROM --platform=$BUILDPLATFORM golang AS build
+FROM --platform=$BUILDPLATFORM docker.io/golang AS build
 WORKDIR /src
 
 # Download Go modules

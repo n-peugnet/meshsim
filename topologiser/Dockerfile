@@ -1,4 +1,4 @@
-FROM golang AS build
+FROM docker.io/golang AS build
 WORKDIR /src
 
 # Download Go modules

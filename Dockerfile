@@ -1,6 +1,6 @@
 # Default image run by meshsim, based on Debian stable.
 # It can be used as an example for custom images.
-FROM debian:stable
+FROM docker.io/debian:stable
 
 # Install some useful network and debug tools.
 RUN apt-get update && apt-get install -y \
