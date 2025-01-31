@@ -29,6 +29,7 @@ import subprocess
 from contextlib import contextmanager
 from itertools import combinations
 from math import sqrt
+import shutil
 import signal
 import sys
 import time
@@ -47,6 +48,7 @@ host = ""
 stdout = subprocess.DEVNULL
 stderr = subprocess.DEVNULL
 dir = path.dirname(path.abspath(__file__))
+tmpdir = ""
 
 class App(Quart):
     def run_simple_task( self, host: str = "0.0.0.0", port: int = 3000, debug: bool | None = None):
@@ -99,7 +101,10 @@ class Server(object):
         code = await proc.wait()
         if code != 0:
             raise Exception("Failed to start HS")
-        await self.update_network_info()
+        await asyncio.gather(
+            self.update_network_info(),
+            self.update_prometheus_conf(),
+        )
         await(asyncio.sleep(3))
 
     async def update_network_info(self):
@@ -114,6 +119,11 @@ class Server(object):
         )
         stdout, _ = await proc.communicate()
         self.mac = stdout.decode().strip()
+
+    async def update_prometheus_conf(self):
+        with open(path.join(tmpdir, "prometheus.yml"), "a") as file:
+            file.write(f"        - node{self.id}:9100\n")
+        return await asyncio.create_subprocess_exec("docker", "kill", "--signal=SIGHUP", "prometheus"+str(id)),
 
     async def set_routes(self, routes):
         # [
@@ -778,7 +788,7 @@ async def check_proc(proc: Process):
 
 
 async def async_main():
-    global args, id, host
+    global args, id, host, tmpdir
 
     parser = argparse.ArgumentParser(description="Mesh network simulator.")
     parser.add_argument(
@@ -832,6 +842,9 @@ async def async_main():
     args = parser.parse_args()
 
     id = args.id
+    tmpdir = "/tmp/meshsim-mesh" + str(id)
+    os.makedirs(tmpdir, exist_ok=True)
+    shutil.copy(path.join(dir, "prometheus.yml"), path.join(tmpdir, "prometheus.yml"))
     host = subprocess.check_output([path.join(dir, "create_network.sh"), str(id)], stderr=sys.stderr, text=True).strip()
 
     if args.debug:
