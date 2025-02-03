@@ -35,6 +35,7 @@ docker run -d --name prometheus$NETWORK_ID \
   --network=mesh$NETWORK_ID \
   -p $((9090 + NETWORK_ID * 100)):9090 \
   -v /tmp/meshsim-mesh$NETWORK_ID/prometheus.yml:/etc/prometheus/prometheus.yml \
+  -v /tmp/meshsim-mesh$NETWORK_ID/prometheus-data:/prometheus \
   docker.io/prom/prometheus \
   > /dev/null
 
