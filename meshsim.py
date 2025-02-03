@@ -755,6 +755,8 @@ async def on_delete_link_health(server1, server2, type):
 
 
 def cleanup():
+    if args.metricsdump:
+        subprocess.call([path.join(dir, "dump_metrics.sh"), str(id)], stdout=args.metricsdump)
     subprocess.call([path.join(dir, "stop_clean_all.sh"), str(id)], stdout=stdout, stderr=stderr)
 
 
@@ -833,6 +835,11 @@ async def async_main():
         "--skip",
         help="Fraction od graphs to skip from the graphml directory (e.g. 3/4)",
         default="0/2",
+    )
+    parser.add_argument(
+        "--metricsdump",
+        help="Output collected metrics in xz compressed open-metrics form into the given file",
+        type=argparse.FileType('wb', 0),
     )
     parser.add_argument(
         "--debug",

@@ -33,3 +33,4 @@ docker stop -t 0 $ids
 docker rm $ids
 
 docker network rm mesh$NETWORK_ID
+rm -rf /tmp/meshsim-mesh$NETWORK_ID/
