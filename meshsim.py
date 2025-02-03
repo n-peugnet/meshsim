@@ -845,7 +845,6 @@ async def async_main():
     tmpdir = "/tmp/meshsim-mesh" + str(id)
     promdir = path.join(tmpdir, "prometheus-data")
     os.makedirs(promdir, exist_ok=True)
-    os.chmod(promdir, 0o777)
     shutil.copy(path.join(dir, "prometheus.yml"), path.join(tmpdir, "prometheus.yml"))
     host = subprocess.check_output([path.join(dir, "create_network.sh"), str(id)], stderr=sys.stderr, text=True).strip()
 
