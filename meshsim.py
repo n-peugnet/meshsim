@@ -121,9 +121,8 @@ class Server(object):
         self.mac = stdout.decode().strip()
 
     async def update_prometheus_conf(self):
-        with open(path.join(tmpdir, "prometheus.yml"), "a") as file:
-            file.write(f"        - node{self.id}:9100\n")
-        return await asyncio.create_subprocess_exec("docker", "kill", "--signal=SIGHUP", "prometheus"+str(id)),
+        with open(path.join(tmpdir, "prometheus-conf", f"node{self.id}.json"), "w") as file:
+            file.write('[{"targets":["node%s:9100"],"labels":{"instance":"node%s"}}]\n' % (self.id, self.id))
 
     async def set_routes(self, routes):
         # [
@@ -850,8 +849,8 @@ async def async_main():
 
     id = args.id
     tmpdir = "/tmp/meshsim-mesh" + str(id)
-    promdir = path.join(tmpdir, "prometheus-data")
-    os.makedirs(promdir, exist_ok=True)
+    os.makedirs(path.join(tmpdir, "prometheus-data"), exist_ok=True)
+    os.makedirs(path.join(tmpdir, "prometheus-conf"), exist_ok=True)
     shutil.copy(path.join(dir, "prometheus.yml"), path.join(tmpdir, "prometheus.yml"))
     host = subprocess.check_output([path.join(dir, "create_network.sh"), str(id)], stderr=sys.stderr, text=True).strip()
 
