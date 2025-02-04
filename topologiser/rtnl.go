@@ -213,6 +213,12 @@ func initRoutes() error {
 	if err != nil {
 		return fmt.Errorf("find gateway: %w", err)
 	}
+
+	// prometheus container is launched first and docker increments IP addresses
+	prometheus := make(net.IP, 4)
+	copy(prometheus, gateway)
+	prometheus[3] += 1
+
 	ipnet, err := findIPv4()
 	if err != nil {
 		return fmt.Errorf("find network: %w", err)
@@ -232,6 +238,15 @@ func initRoutes() error {
 			DstLength: 32,
 			Attributes: rtnetlink.RouteAttributes{
 				Dst:      gateway,
+				OutIface: uint32(dev.Index),
+			},
+		},
+		{ // Add a route to the prometheus container
+			Scope:     unix.RT_SCOPE_LINK,
+			Type:      unix.RTN_UNICAST,
+			DstLength: 32,
+			Attributes: rtnetlink.RouteAttributes{
+				Dst:      prometheus,
 				OutIface: uint32(dev.Index),
 			},
 		},
@@ -319,6 +334,7 @@ func setPeerRoutes(dst, via *Peer) error {
 	if err != nil {
 		return fmt.Errorf("interface %s: %w", linkName, err)
 	}
+	// TODO: send a single message when it is enough
 	routes := []rtnetlink.RouteMessage{
 		{ // Make sure there is a route to the gateway
 			Scope:     unix.RT_SCOPE_LINK,

@@ -1,6 +1,6 @@
 all: .BUILDDATE
 
-.BUILDDATE: topologiser Dockerfile Makefile
+.BUILDDATE: topologiser supervisord.conf Dockerfile Makefile
 	docker build -t gitlab.lip6.fr:5050/ie6/meshsim:latest .
 	date > $@
 

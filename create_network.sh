@@ -27,5 +27,19 @@ set -e
 
 NETWORK_ID=$1
 
+# Create the network
 docker network create --driver bridge mesh$NETWORK_ID > /dev/null
+
+# Start one instance of prometheus
+docker run -d --name prometheus$NETWORK_ID \
+  --network=mesh$NETWORK_ID \
+  --user=$(id -u):$(id -g) \
+  -p $((9090 + NETWORK_ID * 100)):9090 \
+  -v /tmp/meshsim-mesh$NETWORK_ID/prometheus.yml:/etc/prometheus/prometheus.yml \
+  -v /tmp/meshsim-mesh$NETWORK_ID/prometheus-conf:/etc/prometheus/conf.d \
+  -v /tmp/meshsim-mesh$NETWORK_ID/prometheus-data:/prometheus \
+  docker.io/prom/prometheus \
+  > /dev/null
+
+# Return the IP of the gateway
 docker inspect mesh$NETWORK_ID -f '{{range.IPAM.Config}}{{.Gateway}}{{end}}' | head -n1

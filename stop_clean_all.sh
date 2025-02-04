@@ -26,13 +26,11 @@ fi
 
 NETWORK_ID=$1
 
-ids=$(docker container ls -f name=node$NETWORK_ID. -q -a)
+ids="$(docker container ls -f name=node$NETWORK_ID. -q -a) prometheus0"
 
-if [[ ! -z $ids ]]
-then
-	echo "stopping $ids"
-	docker stop -t 0 $ids
-	docker rm $ids
-fi
+echo "stopping $ids"
+docker stop -t 0 $ids
+docker rm $ids
 
 docker network rm mesh$NETWORK_ID
+rm -rf /tmp/meshsim-mesh$NETWORK_ID/
