@@ -18,8 +18,8 @@ animated circles which follow the network links between servers.  When a node
 processes an inbound event, it shows an animation of the event expanding and popping
 like a bubble.
 
-The default image that meshsim launches is a minimal Debian with some network and
-debug tools pre-installed.
+The default image that meshsim launches is a minimal Debian with a prometheus node_exporter
+and some network and debug tools pre-installed.
 
 #### Notes
 
@@ -56,6 +56,20 @@ Now usable in general.
 You can log into the individual containers as `docker exec -it node$NETWORK.$N /bin/bash` to traceroute, ping
 and generally see what see what's going on.
 Inside a network, each node has the hostname `node$N`, which is automatically resolved.
+
+#### Monitoring
+
+Meshsim runs a Prometheus instance in each created network.
+It can be accessed at localhost on port `9090 + networkid*100`, e.g. `http://localhost:9190` for network 1.
+
+By default, it is configured to scrape metrics from the node_exporter of each node of the simulated network.
+But it can be used to scrape other exporters, which can be useful when using [custom images](#custom-image).
+It uses [file service discovery](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#file_sd_config)
+to detect new configurations, so simply creating or modifying a JSON file in `/tmp/meshsim-mesh$NETWORK_ID/prometheus-conf`
+will make Prometheus update its scrape configuration.
+
+The `--metricsdump` option of Meshsim allows to dump the collected metrics in the specified file.
+It will be in xz compressed textual OpenMetrics format.
 
 #### Custom image
 
