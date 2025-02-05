@@ -33,4 +33,4 @@ docker run --rm \
   -v /tmp/meshsim-mesh$NETWORK_ID/prometheus-data:/prometheus \
   --entrypoint=/bin/promtool \
   docker.io/prom/prometheus \
-  tsdb dump-openmetrics /prometheus | xz
+  tsdb dump-openmetrics /prometheus | xz -T4
