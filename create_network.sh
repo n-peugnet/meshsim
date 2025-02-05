@@ -27,6 +27,20 @@ set -e
 
 NETWORK_ID=$1
 
+# Setup temp directory
+tmpdir=/tmp/meshsim-mesh$NETWORK_ID
+mkdir -p $tmpdir/prometheus-data
+mkdir -p $tmpdir/prometheus-conf
+cat <<EOF > $tmpdir/prometheus.yml
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: 'file_discovery'
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/conf.d/*.json
+EOF
+
 # Create the network
 docker network create --driver bridge mesh$NETWORK_ID > /dev/null
 
