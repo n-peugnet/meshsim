@@ -26,7 +26,7 @@ fi
 
 NETWORK_ID=$1
 
-ids="$(docker container ls -f name=node$NETWORK_ID. -q -a) prometheus0"
+ids="$(docker container ls -f name=node$NETWORK_ID. -q -a) prometheus$NETWORK_ID"
 
 echo "stopping $ids"
 docker stop -t 0 $ids
