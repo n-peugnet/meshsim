@@ -18,6 +18,7 @@ _test: dummynet
 	go test -v -coverprofile=c.out ./...
 
 test:
+	go test -c -o=/dev/null ./...
 	unshare -rn $(MAKE) _test
 
 .PHONY: all clean dummynet _test test
