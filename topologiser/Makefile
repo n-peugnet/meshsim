@@ -16,6 +16,6 @@ _test:
 	ip addr add 172.22.0.3/24 dev eth0
 	ip link set eth0 up
 	ip route add default via 172.22.0.1 dev eth0
-	go test -v -cover ./...
+	go test -v -coverprofile=c.out ./...
 
 .PHONY: all clean test _test

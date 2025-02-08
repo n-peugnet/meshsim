@@ -15,8 +15,6 @@ test:
   coverage: '/coverage: \d+\.\d+?%/'
 
 deploy:
-  tags:
-    - yolo
   image: docker:latest
   stage: deploy
   services:
