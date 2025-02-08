@@ -20,9 +20,55 @@ package main
 import (
 	"io"
 	"net/http/httptest"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/florianl/go-tc"
+	"github.com/jsimonetti/rtnetlink/v2"
+	"github.com/mdlayher/netlink"
+	"github.com/vishvananda/netns"
 )
+
+func setupNetNS(t *testing.T) {
+	// Lock the OS Thread so we don't accidentally switch namespaces
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+
+	// Save the current network namespace
+	origns, err := netns.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { origns.Close() })
+
+	// Create a new network namespace
+	newns, err := netns.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { newns.Close() })
+
+	// Use the newly created namespace
+	if err := netns.Set(newns); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { netns.Set(origns) })
+
+	ipnl, err = rtnetlink.Dial(&netlink.Config{NetNS: int(newns)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcnl, err = tc.Open(&tc.Config{NetNS: int(newns)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := exec.Command("make", "dummynet").Run(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestHandleRoutes(t *testing.T) {
 	cases := []struct {
@@ -33,9 +79,7 @@ func TestHandleRoutes(t *testing.T) {
 	}{
 		{"empty routes", "[]", `routes:
 default via 172.22.0.1 dev eth0
-unreachable 172.22.0.0/24 dev 0
-172.22.0.1 dev eth0
-172.22.0.2 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
 `, 200},
 		{
 			"basic route",
@@ -56,9 +100,7 @@ unreachable 172.22.0.0/24 dev 0
 ]`,
 			`routes:
 default via 172.22.0.1 dev eth0
-unreachable 172.22.0.0/24 dev 0
-172.22.0.1 dev eth0
-172.22.0.2 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
 172.22.0.4 dev peer1
 172.22.0.5 via 172.22.0.4 dev peer1
 `, 200},
@@ -71,10 +113,7 @@ unreachable 172.22.0.0/24 dev 0
 }
 
 func subTestHandleRoutes(t *testing.T, request, expected string, code int) {
-	err := initRoutes()
-	if err != nil {
-		t.Fatal(err)
-	}
+	setupNetNS(t)
 	r := strings.NewReader(request)
 	req := httptest.NewRequest("PUT", "http://localhost:3000/routes", r)
 	w := httptest.NewRecorder()

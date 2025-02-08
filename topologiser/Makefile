@@ -8,14 +8,16 @@ all: .BUILDDATE
 clean:
 	rm -f .BUILDDATE c.out
 
-test:
-	unshare -rn $(MAKE) _test
-
-_test:
+dummynet:
 	ip link add eth0 type dummy
 	ip addr add 172.22.0.3/24 dev eth0
 	ip link set eth0 up
 	ip route add default via 172.22.0.1 dev eth0
+
+_test: dummynet
 	go test -v -coverprofile=c.out ./...
 
-.PHONY: all clean test _test
+test:
+	unshare -rn $(MAKE) _test
+
+.PHONY: all clean dummynet _test test

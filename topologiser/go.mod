@@ -6,6 +6,7 @@ require (
 	github.com/florianl/go-tc v0.4.4
 	github.com/jsimonetti/rtnetlink/v2 v2.0.2
 	github.com/mdlayher/netlink v1.7.2
+	github.com/vishvananda/netns v0.0.5
 	golang.org/x/sys v0.20.0
 )
 
