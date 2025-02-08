@@ -6,7 +6,7 @@ all: .BUILDDATE
 	@touch .
 
 clean:
-	rm -f .BUILDDATE
+	rm -f .BUILDDATE c.out
 
 test:
 	unshare -rn $(MAKE) _test
