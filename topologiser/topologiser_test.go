@@ -218,6 +218,24 @@ qdisc netem \d+:0 dev peer4 limit 1000 delay 72ms rate 1433kb/s
 qdisc noqueue 0:0 dev eth0
 qdisc netem \d+:0 dev peer4 limit 1000 delay 105.1ms jitter 12ms 25% rate 14332Mb/s
 `, 200},
+		{"64bits rate", `{
+    "peers": [
+        {
+            "peer": {
+                "id": 4,
+                "ip": "172.22.0.7",
+                "mac": "02:42:ac:16:00:07"
+            },
+            "bandwidth": 1433244000000,
+            "latency": 2,
+            "jitter": 0,
+            "packet_loss": 0
+        }
+    ]
+}`, `qdiscs:
+qdisc noqueue 0:0 dev eth0
+qdisc netem \d+:0 dev peer4 limit 1000 delay 2ms rate 1433Gb/s
+`, 200},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
