@@ -11,5 +11,7 @@ clean: topologiser
 	rm -rf __pycache__
 	rm -f .BUILDDATE
 
-.PHONY: all clean
+test: topologiser
+
+.PHONY: all clean test
 .FORCE:
