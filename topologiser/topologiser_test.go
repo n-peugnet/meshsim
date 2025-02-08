@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"testing"
 
@@ -165,5 +166,59 @@ func subTestHandleRoutes(t *testing.T, request, expected string, code int) {
 	body, _ := io.ReadAll(res.Body)
 	if string(body) != expected {
 		t.Errorf("expected body:\n%sactual:\n%s", expected, body)
+	}
+}
+
+func TestHandleHealth(t *testing.T) {
+	cases := []struct {
+		name string
+		req  string
+		res  string
+		code int
+	}{
+		{"empty health", `{"peers":[]}`, `qdiscs:
+qdisc noqueue 0:0 dev eth0
+`, 200},
+		{"basic health", `{
+    "peers": [
+        {
+            "peer": {
+                "id": 4,
+                "ip": "172.22.0.7",
+                "mac": "02:42:ac:16:00:07"
+            },
+            "bandwidth": 1433244,
+            "latency": 72.0,
+            "jitter": 0,
+            "packet_loss": 0
+        }
+    ]
+}`, `qdiscs:
+qdisc noqueue 0:0 dev eth0
+qdisc netem \d+:0 dev peer4 limit 1000 delay 72ms rate 1433kb/s
+`, 200},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			subTestHandleHealth(t, c.req, c.res, c.code)
+		})
+	}
+}
+
+func subTestHandleHealth(t *testing.T, request, expected string, code int) {
+	setupNetNS(t)
+	r := bytes.NewReader([]byte(request))
+	req := httptest.NewRequest("PUT", "http://localhost:3000/health", r)
+	w := httptest.NewRecorder()
+	handleHealth(w, req)
+
+	res := w.Result()
+	if res.StatusCode != code {
+		t.Errorf("expected %d status code, got: %d", code, res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	match, _ := regexp.Match(expected, body)
+	if !match {
+		t.Errorf("expected body to match:\n%sactual:\n%s", expected, body)
 	}
 }
