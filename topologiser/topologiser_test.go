@@ -18,11 +18,11 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"net/http/httptest"
 	"os/exec"
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/florianl/go-tc"
@@ -70,6 +70,29 @@ func setupNetNS(t *testing.T) {
 	}
 }
 
+func TestInitRoutes(t *testing.T) {
+	buf := bytes.Buffer{}
+	dumpRoutes(&buf)
+	expected := `routes:
+default via 172.22.0.1 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
+`
+	actual := buf.String()
+	if actual != expected {
+		t.Errorf("expected routes before initRoute:\n%sactual:\n%s", expected, actual)
+	}
+
+	initRoutes()
+	buf.Reset()
+	dumpRoutes(&buf)
+	expected = `routes:
+default via 172.22.0.1 dev eth0
+unreachable 172.22.0.0/24 dev 0
+172.22.0.1 dev eth0
+172.22.0.2 dev eth0
+`
+}
+
 func TestHandleRoutes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -81,9 +104,7 @@ func TestHandleRoutes(t *testing.T) {
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
 `, 200},
-		{
-			"basic route",
-			`[
+		{"basic route", `[
     {
         "dst": {
             "id": 2,
@@ -97,12 +118,30 @@ default via 172.22.0.1 dev eth0
         },
         "cost": 72.0
     }
-]`,
-			`routes:
+]`, `routes:
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
 172.22.0.4 dev peer1
 172.22.0.5 via 172.22.0.4 dev peer1
+`, 200},
+		{"direct link", `[
+    {
+        "dst": {
+            "id": 2,
+            "ip": "172.22.0.5",
+            "mac": "02:42:ac:16:00:05"
+        },
+        "via": {
+            "id": 2,
+            "ip": "172.22.0.5",
+            "mac": "02:42:ac:16:00:05"
+        },
+        "cost": 72.0
+    }
+]`, `routes:
+default via 172.22.0.1 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
+172.22.0.5 via 172.22.0.5 dev peer2
 `, 200},
 	}
 	for _, c := range cases {
@@ -114,7 +153,7 @@ default via 172.22.0.1 dev eth0
 
 func subTestHandleRoutes(t *testing.T, request, expected string, code int) {
 	setupNetNS(t)
-	r := strings.NewReader(request)
+	r := bytes.NewReader([]byte(request))
 	req := httptest.NewRequest("PUT", "http://localhost:3000/routes", r)
 	w := httptest.NewRecorder()
 	handleRoutes(w, req)
