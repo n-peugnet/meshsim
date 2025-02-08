@@ -1,22 +1,22 @@
-image: golang
-
 test:
+  tags:
+    - yolo
+  image: golang
   stage: test
   before_script:
     - cd topologiser
   script:
+    - apt update
+    - apt install -y iproute2
     - go build -v
-    - go test -v -coverprofile=c.out ./...
-    - |
-      cat c.out |
-      awk 'BEGIN {cov=0; stat=0;}
-           $3!="" { cov+=($3==1?$2:0); stat+=$2; }
-           END {printf("total coverage: %.2f%% of statements\n", (cov/stat)*100);}'
+    - make test
     - go vet ./...
     - go fmt ./... && git diff --exit-code --color
-  coverage: '/total coverage: \d+\.\d+?%/'
+  coverage: '/coverage: \d+\.\d+?%/'
 
 deploy:
+  tags:
+    - yolo
   image: docker:latest
   stage: deploy
   services:
