@@ -65,6 +65,9 @@ func setupNetNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for k := range peers {
+		delete(peers, k)
+	}
 
 	if err := exec.Command("make", "dummynet").Run(); err != nil {
 		t.Fatal(err)
@@ -196,6 +199,24 @@ qdisc noqueue 0:0 dev eth0
 }`, `qdiscs:
 qdisc noqueue 0:0 dev eth0
 qdisc netem \d+:0 dev peer4 limit 1000 delay 72ms rate 1433kb/s
+`, 200},
+		{"advanced health", `{
+    "peers": [
+        {
+            "peer": {
+                "id": 4,
+                "ip": "172.22.0.7",
+                "mac": "02:42:ac:16:00:07"
+            },
+            "bandwidth": 14332440000,
+            "latency": 105.1,
+            "jitter": 12,
+            "packet_loss": 10
+        }
+    ]
+}`, `qdiscs:
+qdisc noqueue 0:0 dev eth0
+qdisc netem \d+:0 dev peer4 limit 1000 delay 105.1ms jitter 12ms 25% rate 14332Mb/s
 `, 200},
 	}
 	for _, c := range cases {
