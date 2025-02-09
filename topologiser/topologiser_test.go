@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"io"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -71,6 +72,20 @@ func setupNetNS(t *testing.T) {
 
 	if err := exec.Command("make", "dummynet").Run(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConfigureRouting(t *testing.T) {
+	configureRouting()
+	expected := []byte("1\n")
+	actual, _ := os.ReadFile("/proc/sys/net/ipv4/conf/eth0/forwarding")
+	if !bytes.Equal(actual, expected) {
+		t.Errorf("expected forwarding to be %q, got: %q", expected, actual)
+	}
+	expected = []byte("0\n")
+	actual, _ = os.ReadFile("/proc/sys/net/ipv4/conf/eth0/send_redirects")
+	if !bytes.Equal(actual, expected) {
+		t.Errorf("expected send_redirects to be %q, got: %q", expected, actual)
 	}
 }
 
@@ -146,6 +161,18 @@ default via 172.22.0.1 dev eth0
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
 172.22.0.5 via 172.22.0.5 dev peer2
+`, 200},
+		{"remove non-existing", `[
+    {
+        "dst": {
+            "id": 2,
+            "ip": "172.22.0.5",
+            "mac": "02:42:ac:16:00:05"
+        }
+    }
+]`, `routes:
+default via 172.22.0.1 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
 `, 200},
 	}
 	for _, c := range cases {
