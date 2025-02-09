@@ -174,6 +174,7 @@ default via 172.22.0.1 dev eth0
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
 `, 200},
+		{"invalid json", `[`, "decode routes: unexpected EOF\n", 400},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -263,6 +264,7 @@ qdisc netem \d+:0 dev peer4 limit 1000 delay 105.1ms jitter 12ms 25% rate 14332M
 qdisc noqueue 0:0 dev eth0
 qdisc netem \d+:0 dev peer4 limit 1000 delay 2ms rate 1433Gb/s
 `, 200},
+		{"invalid json", `[`, "decode health: unexpected EOF\n", 400},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
