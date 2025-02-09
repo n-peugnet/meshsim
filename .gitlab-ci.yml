@@ -22,10 +22,8 @@ deploy:
   variables:
     PLATFORMS: linux/arm/v7,linux/arm64/v8,linux/amd64
   rules:
-    - if: $CI_COMMIT_BRANCH == "master"
-      when: always
-    # do not run otherwise
-    - when: never
+    - if: $CI_COMMIT_BRANCH != "master"
+      when: never
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
     - docker buildx create --name buildx-builder --use
