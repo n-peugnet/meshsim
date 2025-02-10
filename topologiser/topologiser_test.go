@@ -20,6 +20,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -181,13 +182,13 @@ default via 172.22.0.1 dev eth0
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			subTestHandleRoutes(t, c.req, c.res, c.code)
+			setupNetNS(t)
+			requestHandleRoutes(t, c.req, c.res, c.code)
 		})
 	}
 }
 
-func subTestHandleRoutes(t *testing.T, request, expected string, code int) {
-	setupNetNS(t)
+func requestHandleRoutes(t *testing.T, request, expected string, code int) {
 	r := bytes.NewReader([]byte(request))
 	req := httptest.NewRequest("PUT", "http://localhost:3000/routes", r)
 	w := httptest.NewRecorder()
@@ -271,13 +272,13 @@ qdisc netem \d+:0 dev peer4 limit 1000 delay 2ms rate 1433Gb/s
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			subTestHandleHealth(t, c.req, c.res, c.code)
+			setupNetNS(t)
+			requestHandleHealth(t, c.req, c.res, c.code)
 		})
 	}
 }
 
-func subTestHandleHealth(t *testing.T, request, expected string, code int) {
-	setupNetNS(t)
+func requestHandleHealth(t *testing.T, request, expected string, code int) {
 	r := bytes.NewReader([]byte(request))
 	req := httptest.NewRequest("PUT", "http://localhost:3000/health", r)
 	w := httptest.NewRecorder()
@@ -291,5 +292,125 @@ func subTestHandleHealth(t *testing.T, request, expected string, code int) {
 	match, _ := regexp.Match(expected, body)
 	if !match {
 		t.Errorf("expected body to match:\n%sactual:\n%s", expected, body)
+	}
+}
+
+func ifaceExist(t *testing.T, name string) bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Error("unexpected error: ", err)
+	}
+	for _, iface := range ifaces {
+		if iface.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCompoundRoutes(t *testing.T) {
+	setupNetNS(t)
+	peer1 := "peer1"
+	peer2 := "peer2"
+
+	// Check interfaces right after setup
+	if ifaceExist(t, peer1) {
+		t.Errorf("interface should not exist: %s", peer1)
+	}
+
+	// Add route to peer2 via peer1
+	routes := `[
+    {
+        "dst": {
+            "id": 2,
+            "ip": "172.22.0.5",
+            "mac": "02:42:ac:16:00:05"
+        },
+        "via": {
+            "id": 1,
+            "ip": "172.22.0.4",
+            "mac": "02:42:ac:16:00:04"
+        }
+    }
+]`
+	expected := `routes:
+default via 172.22.0.1 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
+172.22.0.4 dev peer1
+172.22.0.5 via 172.22.0.4 dev peer1
+`
+	requestHandleRoutes(t, routes, expected, 200)
+	if !ifaceExist(t, peer1) {
+		t.Errorf("interface should exist: %s", peer1)
+	}
+
+	// Add direct link to peer1
+	routes = `[
+    {
+        "dst": {
+            "id": 1,
+            "ip": "172.22.0.4",
+            "mac": "02:42:ac:16:00:04"
+        },
+        "via": {
+            "id": 1,
+            "ip": "172.22.0.4",
+            "mac": "02:42:ac:16:00:04"
+        }
+    }
+]`
+	expected = `routes:
+default via 172.22.0.1 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
+172.22.0.4 via 172.22.0.4 dev peer1
+172.22.0.5 via 172.22.0.4 dev peer1
+`
+	requestHandleRoutes(t, routes, expected, 200)
+
+	// Change route to peer2 into direct link
+	routes = `[
+    {
+        "dst": {
+            "id": 2,
+            "ip": "172.22.0.5",
+            "mac": "02:42:ac:16:00:05"
+        },
+        "via": {
+            "id": 2,
+            "ip": "172.22.0.5",
+            "mac": "02:42:ac:16:00:05"
+        }
+    }
+]`
+	expected = `routes:
+default via 172.22.0.1 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
+172.22.0.4 via 172.22.0.4 dev peer1
+172.22.0.5 via 172.22.0.5 dev peer2
+`
+	requestHandleRoutes(t, routes, expected, 200)
+	if !ifaceExist(t, peer2) {
+		t.Errorf("interface should exist: %s", peer2)
+	}
+
+	// Remove route to peer
+	routes = `[
+    {
+        "dst": {
+            "id": 1,
+            "ip": "172.22.0.4",
+            "mac": "02:42:ac:16:00:04"
+        }
+    }
+]`
+	expected = `routes:
+default via 172.22.0.1 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
+172.22.0.5 via 172.22.0.5 dev peer2
+`
+	requestHandleRoutes(t, routes, expected, 200)
+	// This should not delete the interface
+	if !ifaceExist(t, peer1) {
+		t.Errorf("interface should exist: %s", peer1)
 	}
 }
