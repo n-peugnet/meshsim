@@ -33,7 +33,6 @@ docker run -d --name node$NETWORK_ID.$HSID \
 	--privileged \
 	--network mesh$NETWORK_ID \
 	--hostname node$HSID \
-	-p $((19000 + HSID + NETWORK_ID * 100)):3000 \
 	gitlab.lip6.fr:5050/ie6/meshsim:latest
 
 # Add node metrics scrape config for prometheus

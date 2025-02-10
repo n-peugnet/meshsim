@@ -50,11 +50,11 @@ stderr = subprocess.DEVNULL
 dir = path.dirname(path.abspath(__file__))
 
 class App(Quart):
-    def run_simple_task( self, host: str = "0.0.0.0", port: int = 3000, debug: bool | None = None):
+    def run_simple_task( self, host: str, localhost: str, port: int = 3000, debug: bool | None = None):
         config = HyperConfig()
         config.access_log_format = "%(h)s %(r)s %(s)s %(b)s %(D)s"
         config.accesslog = "/dev/stderr"
-        config.bind = [f"{host}:{port}"]
+        config.bind = [f"{localhost}:{port}", f"{host}:{port}"]
         if debug is not None:
             self.debug = debug
         config.errorlog = "/dev/stderr"
@@ -127,9 +127,9 @@ class Server(object):
         app.logger.info("setting routes for %d: %s", self.id, data)
 
         try:
-            r = await put("http://localhost:%d/routes" % (19000 + self.id + id*100), data)
+            r = await put("http://%s:3000/routes" % self.ip, data)
 
-            app.logger.info("Set route with result for %d: %s", self.id, r)
+            app.logger.info("Set route with result for %d: %s", self.id, r.strip())
         except asyncio.TimeoutError:
             app.logger.warning("Set route for %d: timeout", self.id)
         except Exception:
@@ -151,9 +151,9 @@ class Server(object):
         app.logger.info("setting health for %d: %s", self.id, data)
 
         try:
-            r = await put("http://localhost:%d/health" % (19000 + self.id + id*100), data)
+            r = await put("http://%s:3000/health" % self.ip, data)
 
-            app.logger.info("Set health with result for %d: %s", self.id, r)
+            app.logger.info("Set health with result for %d: %s", self.id, r.strip())
         except asyncio.TimeoutError:
             app.logger.warning("Set health for %d: timeout", self.id)
         except Exception:
@@ -870,7 +870,7 @@ async def async_main():
     # so we can't use a TaskGroup to cancel the other tasks when
     # it exits. Instead, we register a callback to cancel all the
     # running tasks manually.
-    server_task = asyncio.create_task(app.run_simple_task(port=3000 + id*100, debug=args.debug))
+    server_task = asyncio.create_task(app.run_simple_task(host, localhost="127.%d.0.1" % args.id, port=3000, debug=args.debug))
     tasks.append(server_task)
     futures = asyncio.gather(*tasks)
     server_task.add_done_callback(lambda _: futures.cancel())

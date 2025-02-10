@@ -48,7 +48,7 @@ docker network create --driver bridge mesh$NETWORK_ID > /dev/null
 docker run -d --name prometheus$NETWORK_ID \
   --network=mesh$NETWORK_ID \
   --user=$(id -u):$(id -g) \
-  -p $((9090 + NETWORK_ID * 100)):9090 \
+  -p 127.$NETWORK_ID.0.1:9090:9090 \
   -v /tmp/meshsim-mesh$NETWORK_ID/prometheus.yml:/etc/prometheus/prometheus.yml \
   -v /tmp/meshsim-mesh$NETWORK_ID/prometheus-conf:/etc/prometheus/conf.d \
   -v /tmp/meshsim-mesh$NETWORK_ID/prometheus-data:/prometheus \

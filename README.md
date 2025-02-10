@@ -60,7 +60,7 @@ Inside a network, each node has the hostname `node$N`, which is automatically re
 #### Monitoring
 
 Meshsim runs a Prometheus instance in each created network.
-It can be accessed at localhost on port `9090 + networkid*100`, e.g. `http://localhost:9190` for network 1.
+It can be accessed at `127.$NETWORK_ID.0.1:9090`, e.g. `http://127.1.0.1:9090` for network 1.
 
 By default, it is configured to scrape metrics from the node_exporter of each node of the simulated network.
 But it can be used to scrape other exporters, which can be useful when using [custom images](#custom-image).
@@ -79,20 +79,15 @@ a tag (e.g. `docker build --tag meshsim-custom .`), then run meshsim with the
 `--start` option pointing to a custom start script (see [`start_hs.sh`](start_hs.sh)
 for reference).
 
-#### Step-by-step checks
+#### Step-by-step debugging
 
-To verify that everythig is working, you can realise the following checks.
+To verify that everythig is working, you can realise the following checks in a Git checkout of meshsim:
 
- * create a docker network: `docker network create --driver bridge mesh0`. Later
-   we will need to know the gateway IP (so that the images can talk to
-   meshsim, etc on the host). On MacOS `host.docker.internal` will work,
-   otherwise run `docker network inspect mesh` and find the Gateway IP.
- * check you can start a node via `./start_hs.sh 0 1 $DOCKER_IP` with 0 as networkid, 1 as hsid and DOCKER_IP being the docker network gateway IP.
+ * create a docker network: `./create_network.sh 0`. This will return an IP that will be needed in the next steps.
+ * check you can start a node via `./start_hs.sh 0 1 $DOCKER_IP` with 0 as networkid, 1 as hsid and DOCKER_IP being the IP returned in the previous step.
  * check if it's running with `docker stats`
  * log into the container to poke around with `docker exec -it node0.1 /bin/bash`
     * other nodes of the same network can be reached by their hostname, for instance `node1` for the current node.
- * Check that the topologiser is listening at http://localhost:19001 (ports are 19000 + hsid + networkid*100)
-    * Don't expect to navigate to this URL and see anything more than a 404. As long as *something* is listening at this port, things are set up correctly.
  * shut it down nicely `./stop_clean_all.sh 0`
 
 #### Limitations
