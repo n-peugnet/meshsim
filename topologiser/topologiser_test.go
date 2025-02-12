@@ -77,6 +77,7 @@ func setupNetNS(t *testing.T) {
 }
 
 func TestConfigureRouting(t *testing.T) {
+	setupNetNS(t)
 	configureRouting()
 	expected := []byte("1\n")
 	actual, _ := os.ReadFile("/proc/sys/net/ipv4/conf/eth0/forwarding")
@@ -94,6 +95,7 @@ func TestConfigureRouting(t *testing.T) {
 }
 
 func TestInitRoutes(t *testing.T) {
+	setupNetNS(t)
 	buf := bytes.Buffer{}
 	dumpRoutes(&buf)
 	expected := `routes:
