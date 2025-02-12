@@ -848,7 +848,7 @@ async def async_main():
     atexit.register(cleanup)
     tasks = []
     procs = []
-    print(f"{time.monotonic_ns()}\tmeshsim\tstart\t", flush=True)
+    print(f"{time.time()}\tmeshsim\tstart\t", flush=True)
     if args.graphmldir != None:
         global mesh
         mesh = DynMesh(host)
@@ -889,7 +889,7 @@ async def async_main():
         except ProcessLookupError:
             print(f"proc {proc.pid} already terminated", file=sys.stderr)
         await proc.wait()
-    print(f"{time.time_ns()}\tmeshsim\tend\t", flush=True)
+    print(f"{time.time()}\tmeshsim\tend\t", flush=True)
 
 def main():
     asyncio.run(async_main())
