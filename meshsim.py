@@ -510,7 +510,6 @@ class DynMesh(Mesh):
         pass
 
     async def setup(self, graph: nx.Graph):
-        print(f"{time.monotonic_ns()}\tmeshsim\tsetup\t", flush=True)
         # start a server for each node of the first graph.
         tasks = []
         input_ids = []
@@ -538,7 +537,6 @@ class DynMesh(Mesh):
 
 
     async def run(self, graphs: list[nx.Graph], period: float = 1.0) -> None:
-        print(f"{time.monotonic_ns()}\tmeshsim\trun\t", flush=True)
         try:
             # update wiring for each period of time.
             for graph in graphs:
@@ -850,16 +848,19 @@ async def async_main():
     atexit.register(cleanup)
     tasks = []
     procs = []
+    print(f"{time.monotonic_ns()}\tmeshsim\tstart\t", flush=True)
     if args.graphmldir != None:
         global mesh
         mesh = DynMesh(host)
         graphs = parse_graphml(args.graphmldir, args.skip)
+        print(f"{time.monotonic_ns()}\tmeshsim\tsetup\t", flush=True)
         await asyncio.create_task(mesh.setup(graphs[0]))
         if args.setup:
             proc = await asyncio.create_subprocess_shell(args.setup, stdout=sys.stderr)
             await check_proc(proc)
             # Wait to make sure setup is complete.
             await(asyncio.sleep(1))
+        print(f"{time.monotonic_ns()}\tmeshsim\trun\t", flush=True)
         tasks.append(asyncio.create_task(mesh.run(graphs[1:], args.period)))
         if args.run:
             # If pgid is zero, then the PGID of the process specified by pid is made the same as its process ID
@@ -888,6 +889,7 @@ async def async_main():
         except ProcessLookupError:
             print(f"proc {proc.pid} already terminated", file=sys.stderr)
         await proc.wait()
+    print(f"{time.time_ns()}\tmeshsim\tend\t", flush=True)
 
 def main():
     asyncio.run(async_main())
