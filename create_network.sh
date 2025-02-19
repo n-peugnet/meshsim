@@ -33,7 +33,7 @@ mkdir -p $tmpdir/prometheus-data
 mkdir -p $tmpdir/prometheus-conf
 cat <<EOF > $tmpdir/prometheus.yml
 global:
-  scrape_interval: ${PROMETHEUS_SCRAPE_INTERVAL:-10}s
+  scrape_interval: ${PROMETHEUS_SCRAPE_INTERVAL:-10s}
 scrape_configs:
   - job_name: 'file_discovery'
     file_sd_configs:
