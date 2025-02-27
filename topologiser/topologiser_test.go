@@ -416,3 +416,64 @@ default via 172.22.0.1 dev eth0
 		t.Errorf("interface should exist: %s", peer1)
 	}
 }
+
+func TestCompoundRoutes2Hops(t *testing.T) {
+	setupNetNS(t)
+
+	// Initialise routes with two routes, one direct to 1, and one
+	// to 2, passing by 1.
+	routes := `[
+    {
+        "dst": {
+            "id": 1,
+            "ip": "172.22.0.4",
+            "mac": "02:42:ac:1e:00:04"
+        },
+        "via": {
+            "id": 1,
+            "ip": "172.22.0.4",
+            "mac": "02:42:ac:1e:00:04"
+        },
+        "cost": 63.0
+    },
+    {
+        "dst": {
+            "id": 2,
+            "ip": "172.22.0.5",
+            "mac": "02:42:ac:1e:00:05"
+        },
+        "via": {
+            "id": 1,
+            "ip": "172.22.0.4",
+            "mac": "02:42:ac:1e:00:04"
+        },
+        "cost": 140.0
+    }
+]`
+	expected := `routes:
+default via 172.22.0.1 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
+172.22.0.4 dev peer1
+172.22.0.5 via 172.22.0.4 dev peer1
+`
+	requestHandleRoutes(t, routes, expected, 200)
+
+	// Onbly deleting the route to 1 should work and keep the rest as is.
+	routes = `[
+    {
+        "dst": {
+            "id": 1,
+            "ip": "172.22.0.4",
+            "mac": "02:42:ac:1e:00:04"
+        },
+        "via": null,
+        "cost": null
+    }
+]`
+	expected = `routes:
+default via 172.22.0.1 dev eth0
+172.22.0.0/24 dev eth0 src 172.22.0.3
+172.22.0.5 via 172.22.0.4 dev peer1
+`
+	requestHandleRoutes(t, routes, expected, 200)
+}

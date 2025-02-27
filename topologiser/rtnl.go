@@ -361,6 +361,8 @@ func setPeerRoutes(dst, via *Peer) error {
 func delPeerRoute(dst *Peer) error {
 	routes := []rtnetlink.RouteMessage{{
 		Family:     unix.AF_INET,
+		Table:      unix.RT_TABLE_MAIN,
+		Scope:      unix.RT_SCOPE_NOWHERE,
 		DstLength:  32,
 		Attributes: rtnetlink.RouteAttributes{Dst: dst.IP},
 	}}
