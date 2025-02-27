@@ -417,7 +417,7 @@ default via 172.22.0.1 dev eth0
 	}
 }
 
-func TestCompoundRoutes2Hops(t *testing.T) {
+func TestDeleteSingleRoute(t *testing.T) {
 	setupNetNS(t)
 
 	// Initialise routes with two routes, one direct to 1, and one
@@ -458,7 +458,7 @@ default via 172.22.0.1 dev eth0
 `
 	requestHandleRoutes(t, routes, expected, 200)
 
-	// Onbly deleting the route to 1 should work and keep the rest as is.
+	// Only deleting the route to 1 should work and keep the rest as is.
 	routes = `[
     {
         "dst": {
