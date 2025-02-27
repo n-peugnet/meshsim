@@ -19,6 +19,8 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -197,6 +199,9 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	port := flag.Int("p", 3000, "Listening port")
+	flag.Parse()
+
 	if err := configureRouting(); err != nil {
 		log.Fatalf("configure routing: %v", err)
 	}
@@ -206,6 +211,6 @@ func main() {
 
 	http.HandleFunc("PUT /routes", handleRoutes)
 	http.HandleFunc("PUT /health", handleHealth)
-	log.Println("launching server on http://0.0.0.0:3000")
-	log.Fatal(http.ListenAndServe(":3000", nil))
+	log.Printf("launching server on http://0.0.0.0:%d", *port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
