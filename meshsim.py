@@ -38,7 +38,7 @@ import async_timeout
 import networkx as nx
 from hypercorn.asyncio import serve
 from hypercorn.config import Config as HyperConfig
-from quart import Quart, abort, jsonify, request, send_from_directory, websocket
+from quart import Quart, Response, abort, jsonify, request, send_from_directory, websocket
 from tqdm import tqdm
 
 args = None
@@ -455,6 +455,9 @@ class Mesh:
 
         return json.dumps(data, sort_keys=True, indent=4)
 
+    def get_graphml_data(self):
+        return "\n".join(nx.generate_graphml(self.graph))
+
     def get_costs(self):
         if not self.path_costs:
             self.path_costs = dict(nx.shortest_path_length(self.graph, weight="weight"))
@@ -704,7 +707,11 @@ async def event_notifs():
 
 @app.route("/data", methods=["GET"])
 def on_get_data():
-    return mesh.get_d3_data()
+    accept = request.headers.get("accept", "")
+    if "application/graphml" in accept:
+        return Response(mesh.get_graphml_data(), mimetype="application/xml")
+    else:
+        return Response(mesh.get_d3_data(), mimetype="application/json")
 
 
 @app.route("/costs", methods=["GET"])
