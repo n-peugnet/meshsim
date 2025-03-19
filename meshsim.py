@@ -29,7 +29,6 @@ import subprocess
 from contextlib import contextmanager
 from itertools import combinations
 from math import sqrt
-import shutil
 import signal
 import sys
 import time
