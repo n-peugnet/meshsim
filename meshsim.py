@@ -456,6 +456,10 @@ class Mesh:
         return json.dumps(data, sort_keys=True, indent=4)
 
     def get_graphml_data(self):
+        for _, server in sorted(self.servers.items()):
+            s = self.graph.nodes[server.id]
+            s["main-ip-addr"] = server.ip
+            s["hostname"] = "node" + str(server.id)
         return "\n".join(nx.generate_graphml(self.graph))
 
     def get_costs(self):
