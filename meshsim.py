@@ -756,7 +756,7 @@ async def on_delete_link_health(server1, server2, type):
 
 def cleanup():
     if args.metricsdump:
-        subprocess.call([path.join(dir, "dump_metrics.sh"), str(id), str(int(start))], stdout=args.metricsdump)
+        subprocess.call([path.join(dir, "dump_metrics.sh"), str(id), str(int(start * 1000))], stdout=args.metricsdump)
     subprocess.call([path.join(dir, "stop_clean_all.sh"), str(id)], stdout=stdout, stderr=stderr)
 
 
