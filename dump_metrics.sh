@@ -17,15 +17,16 @@
 # You should have received a copy of the GNU General Public License
 # along with coap-proxy.  If not, see <https://www.gnu.org/licenses/>.
 
-if [ "$#" -ne 1 ]
+if [ "$#" -ne 2 ]
 then
-  echo 'Usage: ./dump_metrics.sh <NETWORK_ID>'
+  echo 'Usage: ./dump_metrics.sh <NETWORK_ID> <MIN_TIME>'
   exit 1
 fi
 
 set -e
 
 NETWORK_ID=$1
+MIN_TIME=$2
 
 # Start one instance of prometheus
 docker run --rm \
@@ -33,4 +34,4 @@ docker run --rm \
   -v /tmp/meshsim-mesh$NETWORK_ID/prometheus-data:/prometheus \
   --entrypoint=/bin/promtool \
   docker.io/prom/prometheus \
-  tsdb dump-openmetrics /prometheus | xz -T4
+  tsdb dump-openmetrics --min-time=$MIN_TIME /prometheus | xz -T4

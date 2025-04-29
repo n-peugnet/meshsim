@@ -44,6 +44,7 @@ from tqdm import tqdm
 args = None
 id = 0
 host = ""
+start = 0.0
 stdout = subprocess.DEVNULL
 stderr = subprocess.DEVNULL
 dir = path.dirname(path.abspath(__file__))
@@ -755,7 +756,7 @@ async def on_delete_link_health(server1, server2, type):
 
 def cleanup():
     if args.metricsdump:
-        subprocess.call([path.join(dir, "dump_metrics.sh"), str(id)], stdout=args.metricsdump)
+        subprocess.call([path.join(dir, "dump_metrics.sh"), str(id), str(int(start))], stdout=args.metricsdump)
     subprocess.call([path.join(dir, "stop_clean_all.sh"), str(id)], stdout=stdout, stderr=stderr)
 
 
@@ -789,7 +790,7 @@ async def check_proc(proc: Process):
 
 
 async def async_main():
-    global args, id, host
+    global args, id, host, start
 
     parser = argparse.ArgumentParser(description="Mesh network simulator.")
     parser.add_argument(
@@ -858,7 +859,8 @@ async def async_main():
     atexit.register(cleanup)
     tasks = []
     procs = []
-    print(f"{time.time()}\tmeshsim\tstart\t", flush=True)
+    start = time.time()
+    print(f"{start}\tmeshsim\tstart\t", flush=True)
     if args.graphmldir != None:
         global mesh
         mesh = DynMesh(host)
@@ -870,6 +872,7 @@ async def async_main():
             await check_proc(proc)
             # Wait to make sure setup is complete.
             await(asyncio.sleep(1))
+        start = time.time()
         print(f"{time.monotonic_ns()}\tmeshsim\trun\t", flush=True)
         tasks.append(asyncio.create_task(mesh.run(graphs[1:], args.period)))
         if args.run:
