@@ -42,7 +42,11 @@ scrape_configs:
 EOF
 
 # Create the network
-docker network create --driver bridge mesh$NETWORK_ID > /dev/null
+docker network create \
+  --driver bridge \
+  --opt com.docker.network.bridge.name=mesh$NETWORK_ID \
+  mesh$NETWORK_ID \
+  > /dev/null
 
 # Start one instance of prometheus
 docker run -d --name prometheus$NETWORK_ID \

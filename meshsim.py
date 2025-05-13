@@ -755,8 +755,8 @@ async def on_delete_link_health(server1, server2, type):
 
 
 def cleanup():
-    if args.metricsdump:
-        subprocess.call([path.join(dir, "dump_metrics.sh"), str(id), str(int(start * 1000))], stdout=args.metricsdump)
+    if args.dump_metrics:
+        subprocess.call([path.join(dir, "dump_metrics.sh"), str(id), str(int(start * 1000))], stdout=args.dump_metrics)
     subprocess.call([path.join(dir, "stop_clean_all.sh"), str(id)], stdout=stdout, stderr=stderr)
 
 
@@ -784,6 +784,7 @@ def parse_graphml(path: str, skip_str: str) -> list[nx.Graph]:
 
 
 async def check_proc(proc: Process):
+    """Check the return code of an async subprocess."""
     code = await proc.wait()
     if code != 0:
         raise Exception(f"subprocess exited with non-zero code: {code}")
@@ -837,9 +838,13 @@ async def async_main():
         default="0/2",
     )
     parser.add_argument(
-        "--metricsdump",
+        "--dump-metrics",
         help="Output collected metrics in xz compressed open-metrics form into the given file",
         type=argparse.FileType('wb', 0),
+    )
+    parser.add_argument(
+        "--dump-packets",
+        help="Output collected packets in pcap format into the given file (requires tshark)",
     )
     parser.add_argument(
         "--debug",
@@ -861,6 +866,15 @@ async def async_main():
     procs = []
     start = time.time()
     print(f"{start}\tmeshsim\tstart\t", flush=True)
+    if args.dump_packets:
+        proc = await asyncio.create_subprocess_exec("tshark", "-P",
+            "-i", "mesh"+str(id),
+            "-f", "ip[15] > 2 and ip[19] > 2",
+            "-w", args.dump_packets,
+            stdout=sys.stderr,
+        )
+        procs.append(proc)
+        tasks.append(check_proc(proc))
     if args.graphmldir != None:
         global mesh
         mesh = DynMesh(host)
