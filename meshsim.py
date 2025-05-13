@@ -872,6 +872,7 @@ async def async_main():
             "-f", "ip[15] > 2 and ip[19] > 2",
             "-w", args.dump_packets,
             stdout=sys.stderr,
+            process_group=0,
         )
         procs.append(proc)
         tasks.append(check_proc(proc))
