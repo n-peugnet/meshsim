@@ -3,23 +3,26 @@
 ![meshsim](meshsim.gif)
 
 Meshsim lets you define and manage an arbitrary network of nodes
-in docker containers via a web interface.  Nodes are instantiated by clicking
-on the canvas, and the network topology and latency may be adjusted by dragging
-nodes around.  Nodes connect to the nearest 5 nodes within the given latency
-threshold.
+in docker containers. It has two mode of operation:
 
-The bandwidth and latency of individual network links can be overridden by clicking
-on the link (which will turn red) and adjusting the specific values.
+ 1. An interactive mode, where the nodes are instantiated by clicking
+    on the canvas, and the network topology and latency may be adjusted by dragging
+    nodes around.  Nodes connect to the nearest 5 nodes within the given latency
+    threshold.
 
-Traffic on the network is visualised in realtime by having nodes
-emit telemetry to the simulator via websocket, showing which events are emitted
-and received from which server via which network link.  Events are shown as
-animated circles which follow the network links between servers.  When a node
-processes an inbound event, it shows an animation of the event expanding and popping
-like a bubble.
+    The bandwidth and latency of individual network links can be overridden by clicking
+    on the link (which will turn red) and adjusting the specific values.
+
+ 2. An automated mode, where the topology over time is provided by a directory
+    of GraphML files.
 
 The default image that meshsim launches is a minimal Debian with a prometheus node_exporter
-and some network and debug tools pre-installed.
+and some network and debug tools pre-installed, but it can be configured to launch
+a [custom image](#custom-image) (see also this image of
+[Synapse for Meshsim](https://gitlab.lip6.fr/ie6/synapse-meshsim)).
+
+It is also possible to [visualize traffic](#visualizing-traffic), provided that
+the applications running in the containers are instrumented for it.
 
 #### Notes
 
@@ -73,11 +76,34 @@ It will be in xz compressed textual OpenMetrics format.
 
 #### Custom image
 
-It is possible to build and run a custom image for Meshsim, to do this, one can
+It is possible to build and run a custom image for Meshsim, the only requirement
+is to include the `topologiser` inside. To do this, one can
 take inspiration from the [root `Dockerfile`](Dockerfile), build the image with
 a tag (e.g. `docker build --tag meshsim-custom .`), then run meshsim with the
 `--start` option pointing to a custom start script (see [`start_hs.sh`](start_hs.sh)
 for reference).
+
+#### Visualizing traffic
+
+Traffic on the network can be visualised in realtime by having nodes
+emit telemetry to the simulator via websocket, showing which events are emitted
+and received from which server via which network link.  Events are shown as
+animated circles which follow the network links between servers.  When a node
+processes an inbound event, it shows an animation of the event expanding and popping
+like a bubble.
+
+To support this visualization, apps must send logs to the main Meshsim process.
+This has been made initially for the Matrix protocol, so the API is oriented
+towards it:
+
+    GET /log ? msg=SendingPDU & server=<NAME> & event_id=<ID> & destinations=<ARRAY>
+    GET /log ? msg=ReceivedPDU & server=<NAME> & event_id=<ID> & origin=<NAME>
+
+- `<NAME>` is the server's hostname
+- `<ID>` is the event's unique ID
+- `<ARRAY>` is a JSON array of servers' hostnames
+
+All of these must of course be URL encoded.
 
 #### Step-by-step debugging
 
