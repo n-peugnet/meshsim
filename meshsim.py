@@ -805,6 +805,11 @@ async def async_main():
         nargs='?',
     )
     parser.add_argument(
+        "--clean",
+        help="Stop and clean all the containers of a network.",
+        action='store_true',
+    )
+    parser.add_argument(
         "--start",
         help="Path of the command to run for starting up a new node.",
         default=path.join(dir, "start_hs.sh"),
@@ -853,13 +858,18 @@ async def async_main():
     )
     args = parser.parse_args()
 
-    id = args.id
-    host = subprocess.check_output([path.join(dir, "create_network.sh"), str(id)], stderr=sys.stderr, text=True).strip()
-
     if args.debug:
         global stdout, stderr
         stdout = sys.stderr
         stderr = sys.stderr
+
+    id = args.id
+
+    if args.clean:
+        cleanup()
+        return
+
+    host = subprocess.check_output([path.join(dir, "create_network.sh"), str(id)], stderr=sys.stderr, text=True).strip()
 
     atexit.register(cleanup)
     tasks = []
