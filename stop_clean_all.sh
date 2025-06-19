@@ -24,12 +24,14 @@ then
   exit 1
 fi
 
+set -x
+
 NETWORK_ID=$1
 
 ids="$(docker container ls -f name=node$NETWORK_ID. -q -a) prometheus$NETWORK_ID"
 
 echo "stopping $ids"
-docker stop --timeout 10 $ids
+docker stop --time 0 $ids
 docker rm --volumes $ids
 
 docker network rm mesh$NETWORK_ID
