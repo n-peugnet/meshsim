@@ -31,8 +31,8 @@ NETWORK_ID=$1
 ids="$(docker container ls -f name=node$NETWORK_ID. -q -a) prometheus$NETWORK_ID"
 
 echo "stopping $ids"
-docker stop --time 10 $ids
-docker rm --volumes $ids
+docker container stop --time 10 $ids
+docker container rm --volumes $ids
 
 docker network rm mesh$NETWORK_ID
 rm -rf /tmp/meshsim-mesh$NETWORK_ID/
