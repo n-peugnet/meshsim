@@ -879,7 +879,7 @@ async def async_main():
     if args.dump_packets:
         proc = await asyncio.create_subprocess_exec("tshark", "-P",
             "-i", "mesh"+str(id),
-            "-f", "ip[15] > 2 and ip[19] > 2",
+            "-f", "not ip6 and not ip[15] <= 2 and not ip[19] <= 2",
             "-w", args.dump_packets,
             stdout=sys.stderr,
             process_group=0,
