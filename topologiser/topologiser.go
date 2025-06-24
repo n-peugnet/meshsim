@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"os"
 	"sync"
+
+	"github.com/felixge/httpsnoop"
 )
 
 type Peer struct {
@@ -76,6 +78,15 @@ func configureRouting() error {
 	})
 }
 
+// logError writes an error message contructed from the given format and args
+// both to the logs and to the response writer, setting the response code by
+// the way.
+func logError(w http.ResponseWriter, code int, format string, args ...any) {
+	msg := fmt.Sprintf("ERROR: "+format, args)
+	log.Println(msg)
+	http.Error(w, msg, code)
+}
+
 // addPeerIfNew checks if the peer has already been added, if not, it adds it
 // to the known peers and creates a new virtual link that will be used to set
 // the link health for this peer.
@@ -88,15 +99,17 @@ func addPeerIfNew(w http.ResponseWriter, id int) bool {
 	if known {
 		return true
 	}
+	log.Print("adding new peer: ", id)
 	peersLock.Lock()
 	defer peersLock.Unlock()
 	if !peers[id] {
 		if err := addPeerLink(id); err != nil {
-			http.Error(w, "add peer: "+err.Error(), 500)
+			logError(w, 500, "add peer %d: %v", id, err)
 			return false
 		}
 		peers[id] = true
 	}
+	log.Print("added new peer: ", id)
 	return true
 }
 
@@ -106,7 +119,7 @@ func addPeerIfNew(w http.ResponseWriter, id int) bool {
 func decodeJSON(w http.ResponseWriter, r io.Reader, val any, msg string) bool {
 	decoder := json.NewDecoder(r)
 	if err := decoder.Decode(val); err != nil {
-		http.Error(w, msg+": "+err.Error(), 400)
+		logError(w, 400, "%s: %v", msg, err)
 		return false
 	}
 	return true
@@ -139,7 +152,7 @@ func handleRoutes(w http.ResponseWriter, r *http.Request) {
 	for _, route := range routes {
 		if route.Via == nil {
 			if err := delPeerRoute(route.Dst); err != nil {
-				http.Error(w, "del peer route: "+err.Error(), 500)
+				logError(w, 500, "del peer %d route: %v", route.Dst.ID, err)
 				return
 			}
 		} else {
@@ -147,13 +160,13 @@ func handleRoutes(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := setPeerRoutes(route.Dst, route.Via); err != nil {
-				http.Error(w, "set peer route: "+err.Error(), 500)
+				logError(w, 500, "set peer %d route: %v", route.Dst.ID, err)
 				return
 			}
 		}
 	}
 	if err := dumpRoutes(w); err != nil {
-		http.Error(w, "dump routes: "+err.Error(), 500)
+		logError(w, 500, "dump routes: %v", err)
 	}
 }
 
@@ -189,16 +202,17 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := changeQdisc(peer); err != nil {
-			http.Error(w, "change qdisc: "+err.Error(), 500)
+			logError(w, 500, "change peer %d qdisc: %v", id, err)
 			return
 		}
 	}
 	if err := dumpQdiscs(w); err != nil {
-		http.Error(w, "dump qdiscs: "+err.Error(), 500)
+		logError(w, 500, "dump qdisc: %v", err)
 	}
 }
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	port := flag.Int("p", 3000, "Listening port")
 	flag.Parse()
 
@@ -209,8 +223,15 @@ func main() {
 		log.Fatalf("init routes: %v", err)
 	}
 
-	http.HandleFunc("PUT /routes", handleRoutes)
-	http.HandleFunc("PUT /health", handleHealth)
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /routes", handleRoutes)
+	mux.HandleFunc("PUT /health", handleHealth)
 	log.Printf("launching server on http://0.0.0.0:%d", *port)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
+
+	logHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("request:  %s %s", r.Method, r.URL)
+		m := httpsnoop.CaptureMetrics(mux, w, r)
+		log.Printf("response: %s %s code=%d dt=%s", r.Method, r.URL, m.Code, m.Duration)
+	})
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), logHandler))
 }
