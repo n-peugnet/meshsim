@@ -107,7 +107,10 @@ default via 172.22.0.1 dev eth0
 		t.Errorf("expected routes before initRoute:\n%sactual:\n%s", expected, actual)
 	}
 
-	initRoutes()
+	err := initRoutes()
+	if err != nil {
+		t.Fatal("unexpected error: ", err)
+	}
 	buf.Reset()
 	dumpRoutes(&buf)
 	expected = `routes:
@@ -116,6 +119,10 @@ unreachable 172.22.0.0/24 dev 0
 172.22.0.1 dev eth0
 172.22.0.2 dev eth0
 `
+	actual = buf.String()
+	if actual != expected {
+		t.Errorf("expected routes after initRoutes:\n%sactual:\n%s", expected, actual)
+	}
 }
 
 func TestHandleRoutes(t *testing.T) {
