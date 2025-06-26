@@ -180,7 +180,7 @@ default via 172.22.0.1 dev eth0
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
 `, 200},
-		{"invalid json", `[`, "decode routes: unexpected EOF\n", 400},
+		{"invalid json", `[`, "ERROR: decode routes: unexpected EOF\n", 400},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

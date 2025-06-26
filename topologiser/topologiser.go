@@ -82,7 +82,7 @@ func configureRouting() error {
 // both to the logs and to the response writer, setting the response code by
 // the way.
 func logError(w http.ResponseWriter, code int, format string, args ...any) {
-	msg := fmt.Sprintf("ERROR: "+format, args)
+	msg := fmt.Sprintf("ERROR: "+format, args...)
 	log.Println(msg)
 	http.Error(w, msg, code)
 }
