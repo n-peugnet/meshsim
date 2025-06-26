@@ -125,6 +125,33 @@ unreachable 172.22.0.0/24 dev 0
 	}
 }
 
+func TestInitQdiscs(t *testing.T) {
+	setupNetNS(t)
+	buf := bytes.Buffer{}
+	dumpQdiscs(&buf)
+	expected := `qdiscs:
+qdisc noqueue 0:0 dev eth0
+`
+	actual := buf.String()
+	if actual != expected {
+		t.Errorf("expected qdiscs before initQdiscs:\n%sactual:\n%s", expected, actual)
+	}
+
+	err := initQdiscs()
+	if err != nil {
+		t.Fatal("unexpected error: ", err)
+	}
+	buf.Reset()
+	dumpQdiscs(&buf)
+	expected = `qdiscs:
+qdisc prio 1:0 dev eth0
+`
+	actual = buf.String()
+	if actual != expected {
+		t.Errorf("expected qdiscs after initQdiscs:\n%sactual:\n%s", expected, actual)
+	}
+}
+
 func TestHandleRoutes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -153,8 +180,8 @@ default via 172.22.0.1 dev eth0
 ]`, `routes:
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
-172.22.0.4 dev peer1
-172.22.0.5 via 172.22.0.4 dev peer1
+172.22.0.4 dev eth0
+172.22.0.5 via 172.22.0.4 dev eth0
 `, 200},
 		{"direct link", `[
     {
@@ -173,7 +200,7 @@ default via 172.22.0.1 dev eth0
 ]`, `routes:
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
-172.22.0.5 via 172.22.0.5 dev peer2
+172.22.0.5 via 172.22.0.5 dev eth0
 `, 200},
 		{"remove non-existing", `[
     {
@@ -192,6 +219,9 @@ default via 172.22.0.1 dev eth0
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			setupNetNS(t)
+			if err := initQdiscs(); err != nil {
+				t.Fatal("init qdisc: ", err)
+			}
 			requestHandleRoutes(t, c.req, c.res, c.code)
 		})
 	}
@@ -221,7 +251,7 @@ func TestHandleHealth(t *testing.T) {
 		code int
 	}{
 		{"empty health", `{"peers":[]}`, `qdiscs:
-qdisc noqueue 0:0 dev eth0
+qdisc prio 1:0 dev eth0
 `, 200},
 		{"basic health", `{
     "peers": [
@@ -238,8 +268,8 @@ qdisc noqueue 0:0 dev eth0
         }
     ]
 }`, `qdiscs:
-qdisc noqueue 0:0 dev eth0
-qdisc netem \d+:0 dev peer4 limit 1000 delay 72ms rate 1433kb/s
+qdisc prio 1:0 dev eth0
+qdisc netem \d+:0 dev eth0 limit 1000 delay 72ms rate 1433kb/s
 `, 200},
 		{"advanced health", `{
     "peers": [
@@ -256,8 +286,8 @@ qdisc netem \d+:0 dev peer4 limit 1000 delay 72ms rate 1433kb/s
         }
     ]
 }`, `qdiscs:
-qdisc noqueue 0:0 dev eth0
-qdisc netem \d+:0 dev peer4 limit 1000 delay 105.1ms jitter 12ms 25% rate 14332Mb/s
+qdisc prio 1:0 dev eth0
+qdisc netem \d+:0 dev eth0 limit 1000 delay 105.1ms jitter 12ms 25% rate 14332Mb/s
 `, 200},
 		{"64bits rate", `{
     "peers": [
@@ -274,14 +304,17 @@ qdisc netem \d+:0 dev peer4 limit 1000 delay 105.1ms jitter 12ms 25% rate 14332M
         }
     ]
 }`, `qdiscs:
-qdisc noqueue 0:0 dev eth0
-qdisc netem \d+:0 dev peer4 limit 1000 delay 2ms rate 1433Gb/s
+qdisc prio 1:0 dev eth0
+qdisc netem \d+:0 dev eth0 limit 1000 delay 2ms rate 1433Gb/s
 `, 200},
 		{"invalid json", `[`, "decode health: unexpected EOF\n", 400},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			setupNetNS(t)
+			if err := initQdiscs(); err != nil {
+				t.Fatal("init qdisc: ", err)
+			}
 			requestHandleHealth(t, c.req, c.res, c.code)
 		})
 	}
@@ -319,13 +352,10 @@ func ifaceExist(t *testing.T, name string) bool {
 
 func TestCompoundRoutes(t *testing.T) {
 	setupNetNS(t)
-	peer1 := "peer1"
-	peer2 := "peer2"
-
-	// Check interfaces right after setup
-	if ifaceExist(t, peer1) {
-		t.Errorf("interface should not exist: %s", peer1)
+	if err := initQdiscs(); err != nil {
+		t.Fatal("init qdisc: ", err)
 	}
+	// TODO: check that the filter for peer1 does not exists
 
 	// Add route to peer2 via peer1
 	routes := `[
@@ -345,13 +375,11 @@ func TestCompoundRoutes(t *testing.T) {
 	expected := `routes:
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
-172.22.0.4 dev peer1
-172.22.0.5 via 172.22.0.4 dev peer1
+172.22.0.4 dev eth0
+172.22.0.5 via 172.22.0.4 dev eth0
 `
 	requestHandleRoutes(t, routes, expected, 200)
-	if !ifaceExist(t, peer1) {
-		t.Errorf("interface should exist: %s", peer1)
-	}
+	// TODO: check that the filter for peer1 exists
 
 	// Add direct link to peer1
 	routes = `[
@@ -371,8 +399,8 @@ default via 172.22.0.1 dev eth0
 	expected = `routes:
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
-172.22.0.4 via 172.22.0.4 dev peer1
-172.22.0.5 via 172.22.0.4 dev peer1
+172.22.0.4 via 172.22.0.4 dev eth0
+172.22.0.5 via 172.22.0.4 dev eth0
 `
 	requestHandleRoutes(t, routes, expected, 200)
 
@@ -394,13 +422,11 @@ default via 172.22.0.1 dev eth0
 	expected = `routes:
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
-172.22.0.4 via 172.22.0.4 dev peer1
-172.22.0.5 via 172.22.0.5 dev peer2
+172.22.0.4 via 172.22.0.4 dev eth0
+172.22.0.5 via 172.22.0.5 dev eth0
 `
 	requestHandleRoutes(t, routes, expected, 200)
-	if !ifaceExist(t, peer2) {
-		t.Errorf("interface should exist: %s", peer2)
-	}
+	// TODO: check that the filter for peer2 exists
 
 	// Remove route to peer
 	routes = `[
@@ -415,17 +441,17 @@ default via 172.22.0.1 dev eth0
 	expected = `routes:
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
-172.22.0.5 via 172.22.0.5 dev peer2
+172.22.0.5 via 172.22.0.5 dev eth0
 `
 	requestHandleRoutes(t, routes, expected, 200)
-	// This should not delete the interface
-	if !ifaceExist(t, peer1) {
-		t.Errorf("interface should exist: %s", peer1)
-	}
+	// TODO: check that the filter for peer1 still exists
 }
 
 func TestDeleteSingleRoute(t *testing.T) {
 	setupNetNS(t)
+	if err := initQdiscs(); err != nil {
+		t.Fatal("init qdisc: ", err)
+	}
 
 	// Initialise routes with two routes, one direct to 1, and one
 	// to 2, passing by 1.
@@ -460,8 +486,8 @@ func TestDeleteSingleRoute(t *testing.T) {
 	expected := `routes:
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
-172.22.0.4 dev peer1
-172.22.0.5 via 172.22.0.4 dev peer1
+172.22.0.4 dev eth0
+172.22.0.5 via 172.22.0.4 dev eth0
 `
 	requestHandleRoutes(t, routes, expected, 200)
 
@@ -480,7 +506,7 @@ default via 172.22.0.1 dev eth0
 	expected = `routes:
 default via 172.22.0.1 dev eth0
 172.22.0.0/24 dev eth0 src 172.22.0.3
-172.22.0.5 via 172.22.0.4 dev peer1
+172.22.0.5 via 172.22.0.4 dev eth0
 `
 	requestHandleRoutes(t, routes, expected, 200)
 }

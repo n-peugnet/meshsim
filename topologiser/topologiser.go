@@ -92,24 +92,24 @@ func logError(w http.ResponseWriter, code int, format string, args ...any) {
 // the link health for this peer.
 //
 // On error, it writes the error message to w and returns false.
-func addPeerIfNew(w http.ResponseWriter, id int) bool {
+func addPeerIfNew(w http.ResponseWriter, peer Peer) bool {
 	peersLock.RLock()
-	known := peers[id]
+	known := peers[peer.ID]
 	peersLock.RUnlock()
 	if known {
 		return true
 	}
-	log.Print("adding new peer: ", id)
+	log.Print("adding new peer: ", peer.ID)
 	peersLock.Lock()
 	defer peersLock.Unlock()
-	if !peers[id] {
-		if err := addPeerLink(id); err != nil {
-			logError(w, 500, "add peer %d: %v", id, err)
+	if !peers[peer.ID] {
+		if err := addPeerLink(peer, uint32(len(peers)+1)); err != nil {
+			logError(w, 500, "add peer %d: %v", peer.ID, err)
 			return false
 		}
-		peers[id] = true
+		peers[peer.ID] = true
 	}
-	log.Print("added new peer: ", id)
+	log.Print("added new peer: ", peer.ID)
 	return true
 }
 
@@ -156,7 +156,7 @@ func handleRoutes(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			if !addPeerIfNew(w, route.Via.ID) {
+			if !addPeerIfNew(w, *route.Via) {
 				return
 			}
 			if err := setPeerRoutes(route.Dst, route.Via); err != nil {
@@ -198,7 +198,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, peer := range health.Peers {
 		id := peer.Peer.ID
-		if !addPeerIfNew(w, id) {
+		if !addPeerIfNew(w, peer.Peer) {
 			return
 		}
 		if err := changeQdisc(peer); err != nil {
@@ -221,6 +221,9 @@ func main() {
 	}
 	if err := initRoutes(); err != nil {
 		log.Fatalf("init routes: %v", err)
+	}
+	if err := initQdiscs(); err != nil {
+		log.Fatalf("init qdiscs: %v", err)
 	}
 
 	mux := http.NewServeMux()

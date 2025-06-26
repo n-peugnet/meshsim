@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/felixge/httpsnoop v1.0.4
-	github.com/florianl/go-tc v0.4.4
+	github.com/florianl/go-tc v0.4.5
 	github.com/jsimonetti/rtnetlink/v2 v2.0.2
 	github.com/mdlayher/netlink v1.7.2
 	github.com/vishvananda/netns v0.0.5

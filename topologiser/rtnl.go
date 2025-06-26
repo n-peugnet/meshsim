@@ -18,13 +18,13 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/florianl/go-tc"
@@ -35,7 +35,6 @@ import (
 )
 
 const (
-	linkFormat = "peer%d"
 	milisecond = 1_000_000
 )
 
@@ -44,21 +43,15 @@ var (
 	tcnl *tc.Tc
 	dev  *net.Interface
 
-	knownDevs     map[uint32]string
-	knownDevsLock sync.RWMutex
 	defaultQopt   = tc.NetemQopt{
 		Limit: 1000, // default used by iproute2
 	}
 )
 
 func init() {
-	if err := rtnetlink.RegisterDriver(&Macvlan{}); err != nil {
-		panic("register link driver macvlan: " + err.Error())
-	}
 	ipnl = ipnlDial()
 	tcnl = tcnlDial()
 	dev = defaultInterface()
-	knownDevs = ifaceNames()
 }
 
 // ipnlDial opens a connection to the rtnetlink socket for ip-like operations.
@@ -97,26 +90,10 @@ func defaultInterface() *net.Interface {
 	return iface
 }
 
-// ifaceNames returns a map associating the known interfaces index with their
-// name, or else panics.
-func ifaceNames() map[uint32]string {
-	devs := make(map[uint32]string)
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		panic("get interface names: " + err.Error())
-	}
-	for _, iface := range ifaces {
-		devs[uint32(iface.Index)] = iface.Name
-	}
-	return devs
-}
-
 // ifaceName gets the name for given interface from known devices.
 func ifaceName(index uint32) string {
-	knownDevsLock.RLock()
-	defer knownDevsLock.RUnlock()
-	if name, ok := knownDevs[index]; ok {
-		return name
+	if index == uint32(dev.Index) {
+		return dev.Name
 	} else {
 		return fmt.Sprint(index)
 	}
@@ -271,49 +248,84 @@ func initRoutes() error {
 	return nil
 }
 
-// addPeerLink creates a new macvlan link with a netem qdisc for a given peer.
-func addPeerLink(peerID int) error {
-	linkName := fmt.Sprintf(linkFormat, peerID)
-
-	// Create new macvlan link
-	err := ipnl.Link.New(&rtnetlink.LinkMessage{
-		Attributes: &rtnetlink.LinkAttributes{
-			Name: linkName,
-			Type: uint32(dev.Index),
-			Info: &rtnetlink.LinkInfo{
-				Kind: "macvlan",
-				Data: &Macvlan{
-					Mode: MacvlanModeBridge,
-				},
-			},
+func buildRootQdisc(bands uint32) *tc.Object {
+	return &tc.Object{
+		Msg: tc.Msg{
+			Ifindex: uint32(dev.Index),
+			Parent:  tc.HandleRoot,
+			Handle:  core.BuildHandle(1, 0),
 		},
-	})
-	if err != nil {
-		return fmt.Errorf("ip link add: %w", err)
+		Attribute: tc.Attribute{
+			Kind: "prio",
+			Prio: &tc.Prio{Bands: bands},
+		},
 	}
+}
 
-	// Set new link up
-	link, err := net.InterfaceByName(linkName)
-	if err != nil {
-		return fmt.Errorf("interface %s: %w", linkName, err)
+// initQdiscs prepares the routes and the traffic control setup
+// of the container.
+//
+// The traffic control setup uses a prio qdisc only to add classes to the root,
+// allowing to add multiple netem qdiscs as children, which will then be
+// selected by a tc filter, based on the destination MAC address of each packet.
+// It is not used for prioritising traffic.
+//
+// The class 1 does not have netem limits as it is used for talking to the host
+// and to the prometheus server.
+//
+// Here is an overview of the tc setup:
+//
+//	 root 1: prio
+//	       |
+//	       |
+//	 +-----+-----+--...--+
+//	 |     |     |       |
+//	1:1   1:2   1:3     1:n
+//	 |     |     |       |
+//	      20:   30:     n0:
+//	     netem netem   netem
+//	       |     |       |
+func initQdiscs() error {
+	qdisc := buildRootQdisc(2)
+	if err := tcnl.Qdisc().Add(qdisc); err != nil {
+		return fmt.Errorf("tc qdisc add: %w", err)
 	}
-	knownDevsLock.Lock()
-	knownDevs[uint32(link.Index)] = linkName
-	knownDevsLock.Unlock()
-	err = ipnl.Link.Set(&rtnetlink.LinkMessage{
-		Index:  uint32(link.Index),
-		Flags:  unix.IFF_UP,
-		Change: unix.IFF_UP,
-	})
-	if err != nil {
-		return fmt.Errorf("ip link set up: %w", err)
+	return nil
+}
+
+// beuint32 converts an uint32 into a big endian uint32
+func beuint32(i uint32) uint32 {
+	var buf [4]byte
+	binary.NativeEndian.PutUint32(buf[:], i)
+	return binary.BigEndian.Uint32(buf[:])
+}
+
+func newKey(mask uint32, val uint32, offset int) tc.U32Key {
+	return tc.U32Key{Mask: mask, Val: val, Off: uint32(offset)}
+}
+
+func peerHandle(id int) uint32 {
+	return core.BuildHandle(uint32(0x10*id+0x10), 0)
+}
+
+// addPeerLink updates the prio qdisc of eth0 to add an additionnal class with
+// a netem qdisc, together with a tc filter sending the traffic of the given
+// peer to this new class, based on its MAC.
+func addPeerLink(peer Peer, peerCount uint32) error {
+	bands := peerCount + 1
+	// Update root qdisc
+	rootQdisc := buildRootQdisc(bands)
+	if err := tcnl.Qdisc().Change(rootQdisc); err != nil {
+		return fmt.Errorf("change root qdisc: %w", err)
 	}
 
 	// Add netem qdisc with no limitations
+	classID := core.BuildHandle(1, bands)
 	qdisc := &tc.Object{
 		Msg: tc.Msg{
-			Ifindex: uint32(link.Index),
-			Parent:  tc.HandleRoot,
+			Ifindex: uint32(dev.Index),
+			Parent:  classID,
+			Handle:  peerHandle(peer.ID),
 		},
 		Attribute: tc.Attribute{
 			Kind:  "netem",
@@ -324,16 +336,58 @@ func addPeerLink(peerID int) error {
 		return fmt.Errorf("tc qdisc add: %w", err)
 	}
 
+	// Add tc filter to this new class
+	mac, err := net.ParseMAC(peer.MAC)
+	if err != nil {
+		return fmt.Errorf("parse peer MAC: %w", err)
+	}
+	// Our packets look like:
+	//
+	//	# tcpdump -i eth0  -vvve -xx -XX -n
+	//	14:19:49.061214 02:42:ac:12:00:02 > 02:42:ac:12:00:03, ethertype IPv4 (0x0800), [...]
+	//	    172.18.0.2 > 172.18.0.3: ICMP echo request, id 179, seq 1, length 8
+	//		0x0000:  0242 ac12 0003 0242 ac12 0002 0800 4500  .B.....B......E.
+	//		0x0010:  001c cff9 4000 4001 12be ac12 0002 ac12  ....@.@.........
+	//		0x0020:  0003 0800 f74b 00b3 0001                 .....K....
+	//
+	// So to filter on destination MAC:
+	//
+	//		0x0000:  0242 ac12 0003                0800
+	keys := []tc.U32Key{
+		// Is an IP packet
+		newKey(beuint32(0x0000FFFF), beuint32(0x0800), -4),
+		// Compare destination MAC address. Parsed MAC addr is already
+		// stored in big endian, but netlink uses native endianness.
+		newKey(beuint32(0x0000FFFF), binary.NativeEndian.Uint32(append([]byte{0, 0}, mac[0:]...)), -16),
+		newKey(beuint32(0xFFFFFFFF), binary.NativeEndian.Uint32(mac[2:]), -12),
+	}
+	filter := &tc.Object{
+		Msg: tc.Msg{
+			Ifindex: uint32(dev.Index),
+			Parent:  core.BuildHandle(1, 0),
+			Info:    core.FilterInfo(0, unix.ETH_P_IP),
+		},
+		Attribute: tc.Attribute{
+			Kind: "u32",
+			U32: &tc.U32{
+				ClassID: &classID,
+				Sel: &tc.U32Sel{
+					Flags: 0b00000001, // first flag seems to enable the selection
+					NKeys: uint8(len(keys)),
+					Keys:  keys,
+				},
+			},
+		},
+	}
+	if err := tcnl.Filter().Add(filter); err != nil {
+		return fmt.Errorf("tc filter add: %w", err)
+	}
+
 	return nil
 }
 
 // setPeerRoutes creates or replace the needed routes for the given peer.
 func setPeerRoutes(dst, via *Peer) error {
-	linkName := fmt.Sprintf(linkFormat, via.ID)
-	link, err := net.InterfaceByName(linkName)
-	if err != nil {
-		return fmt.Errorf("interface %s: %w", linkName, err)
-	}
 	// TODO: send a single message when it is enough
 	routes := []rtnetlink.RouteMessage{
 		{ // Make sure there is a route to the gateway
@@ -342,7 +396,7 @@ func setPeerRoutes(dst, via *Peer) error {
 			DstLength: 32,
 			Attributes: rtnetlink.RouteAttributes{
 				Dst:      via.IP,
-				OutIface: uint32(link.Index),
+				OutIface: uint32(dev.Index),
 			},
 		},
 		{ // Set the route for this peer
@@ -372,11 +426,6 @@ func delPeerRoute(dst *Peer) error {
 // changeQdisc changes the parameters of the interface's netem qdisc corresponding
 // to the given health status.
 func changeQdisc(health Health) error {
-	linkName := fmt.Sprintf(linkFormat, health.Peer.ID)
-	link, err := net.InterfaceByName(linkName)
-	if err != nil {
-		return fmt.Errorf("interface %s: %w", linkName, err)
-	}
 	var (
 		netem   = &tc.Netem{}
 		rate    uint32
@@ -402,8 +451,8 @@ func changeQdisc(health Health) error {
 
 	qdisc := tc.Object{
 		Msg: tc.Msg{
-			Ifindex: uint32(link.Index),
-			Parent:  tc.HandleRoot,
+			Ifindex: uint32(dev.Index),
+			Handle:  peerHandle(health.Peer.ID),
 		},
 		Attribute: tc.Attribute{
 			Kind:  "netem",
@@ -475,7 +524,7 @@ func dumpQdiscs(w io.Writer) error {
 			parts = append(parts, "0:")
 		} else {
 			maj, min := core.SplitHandle(q.Handle)
-			parts = append(parts, fmt.Sprintf("%d:%d", maj, min))
+			parts = append(parts, fmt.Sprintf("%x:%d", maj, min))
 		}
 		parts = append(parts, "dev", ifaceName(q.Ifindex))
 		switch q.Kind {
